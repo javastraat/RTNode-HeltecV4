@@ -24,6 +24,7 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include "MdnsService.h"
+#include "CoordinateInput.h"
 
 // ─── Node hash (cached in RTC by normal boot, read here without starting RNS) ─
 #define NODE_HASH_RTC_MAGIC  0x504B4841UL
@@ -552,14 +553,17 @@ static void config_send_html() {
         dtostrf(firewall_state.advert_lon, 1, 6, lon_str);
     }
 
+    // No inputmode on these two: iOS's decimal and numeric keypads have no
+    // minus key, so western and southern coordinates could not be typed at
+    // all (issue #38). The full keyboard has '-'.
     html += F("<div class='row'>");
     html += F("<div><label>Latitude (&deg;)</label>");
-    html += F("<input id='advert_lat' name='advert_lat' type='text' inputmode='decimal' "
+    html += F("<input id='advert_lat' name='advert_lat' type='text' "
               "placeholder='e.g. 37.774929' value='");
     html += String(lat_str);
     html += F("'></div>");
     html += F("<div><label>Longitude (&deg;)</label>");
-    html += F("<input id='advert_lon' name='advert_lon' type='text' inputmode='decimal' "
+    html += F("<input id='advert_lon' name='advert_lon' type='text' "
               "placeholder='e.g. -122.419416' value='");
     html += String(lon_str);
     html += F("'></div>");
@@ -742,31 +746,23 @@ static void config_handle_save() {
     // ── Device advertisement settings ──
     firewall_state.advert_enabled = (config_server->arg("advert_en").toInt() == 1);
 
-    // Empty lat/lon strings are treated as "not set" → 0.0. Otherwise parse
-    // and clamp to valid ranges; out-of-range values are silently coerced
-    // to 0.0 rather than rejecting the whole save.
+    // Empty lat/lon strings are treated as "not set" → 0.0. Text that does
+    // not parse, or lies outside the valid range, is coerced to 0.0 rather
+    // than rejecting the whole save.
     String lat_arg = config_server->arg("advert_lat");
     String lon_arg = config_server->arg("advert_lon");
     lat_arg.trim();
     lon_arg.trim();
-    if (lat_arg.length() == 0) {
-        firewall_state.advert_lat = 0.0;
-    } else {
-        double lat_val = lat_arg.toDouble();
-        if (lat_val < -90.0 || lat_val > 90.0 || isnan(lat_val)) {
-            lat_val = 0.0;
-        }
-        firewall_state.advert_lat = lat_val;
+    double lat_val = 0.0;
+    double lon_val = 0.0;
+    if (!parse_coordinate_text(lat_arg.c_str(), -90.0, 90.0, lat_val)) {
+        lat_val = 0.0;
     }
-    if (lon_arg.length() == 0) {
-        firewall_state.advert_lon = 0.0;
-    } else {
-        double lon_val = lon_arg.toDouble();
-        if (lon_val < -180.0 || lon_val > 180.0 || isnan(lon_val)) {
-            lon_val = 0.0;
-        }
-        firewall_state.advert_lon = lon_val;
+    if (!parse_coordinate_text(lon_arg.c_str(), -180.0, 180.0, lon_val)) {
+        lon_val = 0.0;
     }
+    firewall_state.advert_lat = lat_val;
+    firewall_state.advert_lon = lon_val;
 
     firewall_state.advert_jitter = (config_server->arg("advert_jitter").toInt() == 1);
 
