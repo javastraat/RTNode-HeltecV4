@@ -24,36 +24,53 @@
 
 namespace res {
 
-// Things that can hold loop() up while they finish.
-enum Cause : uint8_t { LORA_TX = 0, FLASH, TCP, CAUSE_COUNT };
+// Things that can hold loop() up while they finish. RX is Reticulum
+// processing a received packet (any interface), JOBS its periodic work,
+// BLE the Bluetooth interface's loop, SCREEN a display update (DISPLAY is an Arduino macro).
+enum Cause : uint8_t { LORA_TX = 0, FLASH, TCP, RX, JOBS, BLE, SCREEN, CAUSE_COUNT };
 
 #ifdef RESOURCE_MONITOR
 
 extern uint32_t cause_us[CAUSE_COUNT];   // cumulative since boot
 extern uint32_t cause_ops[CAUSE_COUNT];
 
-// Adds its own lifetime to a cause.
+// Adds its own lifetime to a cause. A timer started inside another pauses
+// it, so each microsecond counts once, to the innermost cause (a flash write
+// inside JOBS is FLASH, a packet received inside BLE is RX).
+class Timed;
+extern Timed* timed_current;
+
 class Timed {
 public:
-    explicit Timed(Cause cause) : _cause(cause), _start(micros()) {}
-    ~Timed() {
-        cause_us[_cause] += micros() - _start;
-        cause_ops[_cause]++;
+    explicit Timed(Cause cause) : _cause(cause), _start(micros()), _outer(timed_current) {
+        if (_outer) cause_us[_outer->_cause] += _start - _outer->_start;
+        timed_current = this;
     }
+    ~Timed() {
+        uint32_t now = micros();
+        cause_us[_cause] += now - _start;
+        cause_ops[_cause]++;
+        timed_current = _outer;
+        if (_outer) _outer->_start = now;
+    }
+    Timed(const Timed&) = delete;
+    Timed& operator=(const Timed&) = delete;
 private:
     Cause _cause;
     uint32_t _start;
+    Timed* _outer;
 };
 
 // Timed flash operation; logs itself when it takes 20 ms or more.
 class FlashOp {
 public:
-    FlashOp(const char* op, const char* path) : _op(op), _path(path), _start(micros()) {}
+    FlashOp(const char* op, const char* path) : _op(op), _path(path), _start(micros()), _timed(FLASH) {}
     ~FlashOp();
 private:
     const char* _op;
     const char* _path;
     uint32_t _start;
+    Timed _timed;
 };
 
 void loop_begin();

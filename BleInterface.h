@@ -51,6 +51,7 @@
 #include <Transport.h>
 #include <Identity.h>
 #include <Log.h>
+#include "ResourceMonitor.h"
 // Config.h defines MTU (508), which NimBLE's headers use as a parameter name.
 #pragma push_macro("MTU")
 #undef MTU
@@ -192,6 +193,7 @@ public:
     void deliver(const uint8_t* data, size_t len) {
         rx_packets++;
         rx_bytes += len;
+        res::Timed res_rx(res::RX);
         handle_incoming(RNS::Bytes(data, len));
     }
 

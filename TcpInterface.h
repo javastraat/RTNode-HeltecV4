@@ -322,6 +322,7 @@ protected:
     // ─── RNS InterfaceImpl: incoming packet to RNS Transport ─────────────────
     virtual void handle_incoming(const RNS::Bytes& data) override {
         TRACEF("TcpInterface.handle_incoming: (%u bytes)", data.size());
+        res::Timed res_rx(res::RX);
         InterfaceImpl::handle_incoming(data);
     }
 

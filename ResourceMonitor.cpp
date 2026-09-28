@@ -18,6 +18,7 @@ namespace res {
 
 uint32_t cause_us[CAUSE_COUNT] = {0};
 uint32_t cause_ops[CAUSE_COUNT] = {0};
+Timed* timed_current = nullptr;
 
 namespace {
 
@@ -88,7 +89,8 @@ void report() {
     Serial.printf(
         "[RES] t=%lu heap=%u/%u/%u psram=%u/%u new=%s loops=%lu max=%lums p99%sms "
         "over20=%lu over100=%lu over1000=%lu lora_tx=%lums/%lu flash=%lums/%lu tcp=%lums/%lu "
-        "q_hw=%u q_drop=%lu split_drop=%lu ic_held=%u ic_drop=%lu wifi=%d/%d\r\n",
+        "q_hw=%u q_drop=%lu split_drop=%lu ic_held=%u ic_drop=%lu wifi=%d/%d "
+        "rx=%lums/%lu jobs=%lums/%lu ble=%lums/%lu display=%lums/%lu\r\n",
         (unsigned long)millis(),
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
         (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
@@ -110,16 +112,18 @@ void report() {
         (unsigned long)window.lora_split_drops,
         (unsigned)RNS::Transport::ingress_held_count(),
         (unsigned long)RNS::Transport::ingress_dropped_count(),
-        (int)WiFi.status(), (int)WiFi.RSSI());
+        (int)WiFi.status(), (int)WiFi.RSSI(),
+        (unsigned long)(delta_us[RX] / 1000), (unsigned long)delta_ops[RX],
+        (unsigned long)(delta_us[JOBS] / 1000), (unsigned long)delta_ops[JOBS],
+        (unsigned long)(delta_us[BLE] / 1000), (unsigned long)delta_ops[BLE],
+        (unsigned long)(delta_us[SCREEN] / 1000), (unsigned long)delta_ops[SCREEN]);
     window = Window{};
 }
 
 }  // namespace
 
 FlashOp::~FlashOp() {
-    uint32_t elapsed = micros() - _start;
-    cause_us[FLASH] += elapsed;
-    cause_ops[FLASH]++;
+    uint32_t elapsed = micros() - _start;   // FLASH itself is counted by _timed
     if (elapsed >= FLASH_REPORT_US) {
         Serial.printf("[FLASH] t=%lu %lums %s %s\r\n", (unsigned long)millis(),
                       (unsigned long)(elapsed / 1000), _op, _path ? _path : "");
@@ -146,15 +150,14 @@ void loop_end() {
         uint32_t attributed = 0;
         for (size_t c = 0; c < CAUSE_COUNT; c++) attributed += cause_us[c] - loop_start_cause_us[c];
         uint32_t other = elapsed > attributed ? elapsed - attributed : 0;
-        Serial.printf("[STALL] t=%lu %lums lora_tx=%lums/%lu flash=%lums/%lu tcp=%lums/%lu other=%lums\r\n",
+        auto ms = [](Cause c) { return (unsigned long)((cause_us[c] - loop_start_cause_us[c]) / 1000); };
+        auto ops = [](Cause c) { return (unsigned long)(cause_ops[c] - loop_start_cause_ops[c]); };
+        Serial.printf("[STALL] t=%lu %lums lora_tx=%lums/%lu flash=%lums/%lu tcp=%lums/%lu other=%lums "
+                      "rx=%lums/%lu jobs=%lums/%lu ble=%lums/%lu display=%lums/%lu\r\n",
                       (unsigned long)millis(), (unsigned long)(elapsed / 1000),
-                      (unsigned long)((cause_us[LORA_TX] - loop_start_cause_us[LORA_TX]) / 1000),
-                      (unsigned long)(cause_ops[LORA_TX] - loop_start_cause_ops[LORA_TX]),
-                      (unsigned long)((cause_us[FLASH] - loop_start_cause_us[FLASH]) / 1000),
-                      (unsigned long)(cause_ops[FLASH] - loop_start_cause_ops[FLASH]),
-                      (unsigned long)((cause_us[TCP] - loop_start_cause_us[TCP]) / 1000),
-                      (unsigned long)(cause_ops[TCP] - loop_start_cause_ops[TCP]),
-                      (unsigned long)(other / 1000));
+                      ms(LORA_TX), ops(LORA_TX), ms(FLASH), ops(FLASH), ms(TCP), ops(TCP),
+                      (unsigned long)(other / 1000),
+                      ms(RX), ops(RX), ms(JOBS), ops(JOBS), ms(BLE), ops(BLE), ms(SCREEN), ops(SCREEN));
     }
 
     uint32_t now = millis();

@@ -165,6 +165,7 @@ protected:
     VERBOSEF("[LoRa] RX %u bytes", data.size());
     TRACEF("LoRaInterface.handle_incoming: (%u bytes) data: %s", data.size(), data.toHex().c_str());
     TRACE("LoRaInterface.handle_incoming: sending packet to rns...");
+    res::Timed res_rx(res::RX);
     InterfaceImpl::handle_incoming(data);
   }
 	virtual void send_outgoing(const RNS::Bytes& data) {
@@ -2932,6 +2933,7 @@ void loop() {
 #ifdef HAS_RNS
   // CBA
   if (reticulum) {
+	  res::Timed res_jobs(res::JOBS);
 	  reticulum.loop();
   }
 
@@ -2943,6 +2945,7 @@ void loop() {
   }
 #ifdef RTNODE_BLE
   if (reticulum) {
+    res::Timed res_ble(res::BLE);
     ble::loop();
   }
 #endif
@@ -3180,7 +3183,10 @@ void loop() {
   #endif
 
   #if HAS_DISPLAY
-    if (disp_ready && !display_updating) update_display();
+    if (disp_ready && !display_updating) {
+      res::Timed res_display(res::SCREEN);
+      update_display();
+    }
   #endif
 
   // LED solid when operational on V3/V4 boards (yield to fast blink during white screen).
