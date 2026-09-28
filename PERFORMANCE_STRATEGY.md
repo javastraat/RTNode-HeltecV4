@@ -236,6 +236,19 @@ can evict it at once — a legitimate peer is locked out until the flood's
 entries expire. The ingress budget (rule 6) and a recency tie-break in the
 cull are the fixes to evaluate.
 
+**Head-of-line blocking on LoRa (2026-09-27, stock RNode on the bench).** The
+LoRa TX queue is FIFO, so a proof or link packet waits behind announce
+rebroadcasts (1.8 s each at SF10); event-driven TX adds a CSMA gap (~0.8 s
+at SF10) before every packet, where the old whole-queue flush sent back to
+back. A proof round trip measured 6.3 s. Options: send non-announce packets
+first (changes order, not what is sent), and/or the LoRa announce cap
+(declined for now, 2026-09-27).
+
+**Bench note.** The stock RNode (Heltec V3, `/dev/cu.usbserial-0001`) kept its
+radio off ("Radio state mismatch", state offline) because its stored target
+firmware hash was blank EEPROM; fixed with `rnodeconf --firmware-hash
+<actual hash>` (read with `--get-firmware-hash`), as in LEARNED_SO_FAR.md.
+
 **Fix direction** (each measured on its own, rule 1)
 
 - Event-driven LoRa TX: route TxDone to DIO1, send one packet per TxDone
@@ -395,3 +408,4 @@ Each step's results go in the log below before the next step starts.
 | 2026-09-27 | + PSRAM heap (072c873) | V4.2 | B flood 1/s 5 min | 191 KB | ≤ 5 ms / 58.9 s | 1.2 % / 209 ms | 1 | WiFi healthy; PSRAM 2.06→1.69 MB free; **task-watchdog reboot at +282 s** (LoRa flush > 60 s); 40 queue drops |
 | 2026-09-27 | + event-driven LoRa TX (0bb88d4) | V4.2 | B flood 1/s 5 min | 191 KB | ≤ 1 ms / 17.4 s | 0 % / 186 ms | 0 | LoRa TX blocks loop 10–16 ms/min (was up to 85 s); no reboot; stalls now the once-a-minute cache cleanup: 69–90 deletes + ~8 s unattributed each; 300 cache writes, 208 deletes in 5 min; 354 queue drops (flood ≫ SF10 capacity) |
 | 2026-09-27 | + RAM announce cache | V4.2 | B flood 1/s 5 min | 194 KB | ≤ 1 ms / 2.1 s | 0 % / 190 ms | 0 | 5 stalls (was 166); flash 0.6–1.5 s/min (was 17–20 s); path requests answered from the RAM cache in 0.48 s (`tests/bench_path_response.py`) |
+| 2026-09-27 | + RAM announce cache (e03d5d1) | V4.2 + stock RNode (Heltec V3, fw 1.86) | lora-to-local-tcp proof probe | — | — | — | — | **LoRa RX and TX verified with event-driven TX**: path in 4.3 s, delivered with proof, RTT 6.3 s. The proof waited behind a queued 183-byte announce (FIFO, 1.84 s airtime) plus a 0.8 s CSMA gap per packet |
