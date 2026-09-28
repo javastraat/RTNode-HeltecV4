@@ -117,7 +117,10 @@ class Agent:
         since = self.mark()
         self.process.stdin.write(json.dumps(command) + "\n")
         self.process.stdin.flush()
-        return self.wait(lambda e: e["event"] == reply and e.get("dest", command.get("dest")) == command.get("dest"),
+        # A command about a destination waits for the reply about that one;
+        # any other (announce, silent, flood) for the first reply of its kind.
+        want = command.get("dest")
+        return self.wait(lambda e: e["event"] == reply and (want is None or e.get("dest") == want),
                          wait_s, since)
 
     def quit(self):
@@ -169,7 +172,12 @@ def lan(args):
                     print(f"  SKIP path      {a.label:>5} -> {b.label:<5} prnsd not in gateway mode "
                           "(tests/prnsd/config; then --prnsd-gateway)", flush=True)
                     continue
-                path = a.call("path", 60, cmd="path", dest=b.silent, timeout=45 if slow(a, b) else 15)
+                # A destination of b's that nobody has asked for yet: a
+                # gateway-mode transport node (prnsd) that passed on another
+                # agent's request for the same one holds this request for
+                # 45 s (RNS 1.5.2 path-request gate) and never hears the answer.
+                fresh = b.call("silent", 10, cmd="silent")
+                path = a.call("path", 60, cmd="path", dest=fresh["dest"], timeout=45 if slow(a, b) else 15)
                 record("path", a, b, path and path["ok"], s=path.get("s") if path else None,
                        hops=path.get("hops") if path else None)
                 if slow(a, b):

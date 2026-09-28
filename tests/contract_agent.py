@@ -17,10 +17,11 @@ SHA-256.
 
 Commands: announce; path {dest, timeout}; link {dest, aspects, timeout};
 echo {dest, n, size, timeout}; resource {dest, size, timeout}; send {dest,
-aspects, n, size, gap, wait} (single packets, no link, proofs counted); flood {rate, duration} (announces for
+aspects, n, size, gap, wait} (single packets, no link, proofs counted);
+silent (another never-announced destination); flood {rate, duration} (announces for
 fresh destinations); close {dest}; quit.
 Events: ready, heard (every announce heard), path, link, link_in, echo,
-resource, resource_in, packet_in, flood, error.
+resource, resource_in, packet_in, flood, silent, error.
 """
 import argparse
 import hashlib
@@ -96,14 +97,18 @@ def main():
         link.set_resource_concluded_callback(concluded)
 
     destinations = {}
-    for suffix in ("", "silent"):
-        aspects = ["contract", args.name] + ([suffix] if suffix else [])
-        d = RNS.Destination(identity, RNS.Destination.IN, RNS.Destination.SINGLE, APP, *aspects)
+
+    def add_destination(key, *suffix):
+        d = RNS.Destination(identity, RNS.Destination.IN, RNS.Destination.SINGLE, APP, "contract", args.name, *suffix)
         which = d.hash.hex()
         d.set_link_established_callback(lambda link, which=which: on_link(link, which))
         d.set_packet_callback(lambda data, packet, which=which: emit(event="packet_in", dest=which, size=len(data)))
         d.set_proof_strategy(RNS.Destination.PROVE_ALL)
-        destinations[suffix or "main"] = d
+        destinations[key] = d
+        return d
+
+    add_destination("main")
+    add_destination("silent", "silent")
 
     class Heard:
         aspect_filter = None
@@ -213,6 +218,13 @@ def main():
                     receipt.set_delivery_callback(lambda r: proved.append(r))
             time.sleep(command.get("wait", 10))
             emit(event="send", dest=command["dest"], n=command.get("n", 1), proved=len(proved))
+        elif cmd == "silent":
+            # Another never-announced destination: a path check that is the
+            # first to ask for it, so no transport node's path-request gate
+            # (45 s in RNS 1.5.2) holds it back.
+            n = len(destinations)
+            d = add_destination(f"silent{n}", "silent", str(n))
+            emit(event="silent", dest=d.hash.hex())
         elif cmd == "flood":
             # Announces for fresh destinations, one each, at a steady rate.
             rate, duration = float(command.get("rate", 20)), float(command.get("duration", 60))
