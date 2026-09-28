@@ -39,6 +39,7 @@
 #include "MdnsService.h"
 #include "esp_bt.h"
 #endif
+#include "ResourceMonitor.h"
 
 // CBA FileSystem
 #if defined(RNS_USE_FS)
@@ -176,6 +177,7 @@ protected:
         queue_height >= CONFIG_QUEUE_MAX_LENGTH || data.size() > available_bytes) {
         WARNINGF("[LoRa] TX DROP %u bytes: queue packets=%u bytes=%u",
             data.size(), queue_height, queued_bytes);
+        res::note_lora_drop();
         return;
     }
 
@@ -192,6 +194,7 @@ protected:
         fifo16_push(&packet_starts, packet_start);
         fifo16_push(&packet_lengths, packet_length);
         current_packet_start = queue_cursor;
+        res::note_lora_queued(queue_height);
     }
     // Perform post-send housekeeping
     InterfaceImpl::handle_outgoing(data);
@@ -1006,6 +1009,19 @@ void setup() {
       boundary_nominal_path_table_maxpersist = RNS::Transport::probe_destination_enabled();
       firewall_load_config();
 
+#ifdef RTNODE_BENCH
+      // Bench build only (env rtnode_heltec_v4_bench): run the load harness
+      // without touching saved settings. These change firewall_state in RAM;
+      // nothing on this boot path writes it back, so reflashing a release
+      // build restores the stored configuration unchanged.
+      for (size_t slot = 0; slot < FIREWALL_BACKBONE_SLOTS; slot++) {
+        firewall_state.backbones[slot].enabled = false;
+      }
+      firewall_state.ap_tcp_enabled = true;
+      firewall_state.ap_tcp_port = 4242;
+      Serial.write("[BENCH] overrides: backbones off, local TCP server on 4242 (saved settings untouched)\r\n");
+#endif
+
       // Bridge probe toggle to Transport (read before Transport::start())
       firewall_probe_enabled = firewall_state.probe_enabled;
 
@@ -1148,6 +1164,8 @@ void setup() {
       } else if (firewall_state.wifi_enabled) {
         HEAD("Firewall Mode: Waiting for WiFi before starting TCP interfaces", RNS::LOG_WARNING);
       }
+
+      res::boot_report();
 
       // ── Startup LAN probe ──────────────────────────────────────────────
       // Send a path request for our own transport identity on LoRa to trigger
@@ -1745,6 +1763,7 @@ void update_airtime() {
 }
 
 void transmit(uint16_t size) {
+  res::Timed res_lora_tx(res::LORA_TX);
   VERBOSEF("[LoRa] TXSTART %u bytes", size);
   if (radio_online) {
     if (!promisc) {
@@ -2592,6 +2611,14 @@ void validate_status() {
         lora_txp  = 28;
         Serial.write("[Boundary] No LoRa config in EEPROM, using defaults\r\n");
       }
+#if defined(RTNODE_BENCH) && defined(RTNODE_BENCH_TXP)
+      // Bench build only: cap transmit power so load tests stay on the bench.
+      if (lora_txp > RTNODE_BENCH_TXP) {
+        Serial.printf("[BENCH] overrides: txp %d capped to %d (saved settings untouched)\r\n",
+                      (int)lora_txp, (int)RTNODE_BENCH_TXP);
+        lora_txp = RTNODE_BENCH_TXP;
+      }
+#endif
       // Always log the active channel config so tests/diagnostics can verify it
       Serial.printf("[Boundary] LoRa: freq=%lu bw=%lu sf=%u cr=%u txp=%u\r\n",
           (unsigned long)lora_freq, (unsigned long)lora_bw,
@@ -2752,6 +2779,7 @@ void tx_queue_handler() {
 void work_while_waiting() { loop(); }
 
 void loop() {
+  res::loop_begin();
 
 #if MCU_VARIANT == MCU_ESP32
   // Yield to FreeRTOS scheduler to prevent task WDT timeouts
@@ -3059,6 +3087,8 @@ void loop() {
       kiss_indicate_error(ERROR_MEMORY_LOW); memory_low = false;
     #endif
   }
+
+  res::loop_end();
 }
 
 void sleep_now() {

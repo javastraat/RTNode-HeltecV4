@@ -22,6 +22,7 @@
 #include <Interface.h>
 #include <Transport.h>
 #include <Bytes.h>
+#include "ResourceMonitor.h"
 
 // ─── TCP Interface Configuration ─────────────────────────────────────────────
 #define TCP_IF_DEFAULT_PORT      4242
@@ -213,7 +214,11 @@ public:
                         if (_clients[i].framing == TCP_FRAMING_AUTO) continue;
                         uint8_t delimiter = _clients[i].framing == TCP_FRAMING_KISS ? KISS_FEND : HDLC_FLAG;
                         uint8_t keepalive[] = { delimiter, delimiter };
-                        size_t written = _clients[i].client.write(keepalive, 2);
+                        size_t written;
+                        {
+                            res::Timed res_tcp(res::TCP);
+                            written = _clients[i].client.write(keepalive, 2);
+                        }
                         if (written == 0) {
                             _cleanup_client(i, "keepalive write failed");
                         }
@@ -297,7 +302,11 @@ protected:
                     if (flen >= frame_cap - 4) break;
                 }
                 frame_buf[flen++] = delimiter;
-                size_t written = _clients[i].client.write(frame_buf, flen);
+                size_t written;
+                {
+                    res::Timed res_tcp(res::TCP);
+                    written = _clients[i].client.write(frame_buf, flen);
+                }
                 if (written == 0) {
                     _cleanup_client(i, "write failed");
                 }
@@ -502,6 +511,7 @@ private:
 
     // ─── Client-mode outbound connection ─────────────────────────────────────
     void _connect_client() {
+        res::Timed res_tcp(res::TCP);
         if (_target_host[0] == '\0') {
             Serial.println("[TcpIF] No target host configured for client mode");
             return;

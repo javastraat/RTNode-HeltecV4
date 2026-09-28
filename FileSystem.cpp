@@ -1,6 +1,7 @@
 #include "FileSystem.h"
 #include "FileStream.h"
 #include "FileSystemType.h"
+#include "ResourceMonitor.h"
 
 #ifdef HAS_RNS
 
@@ -327,6 +328,7 @@ void FileSystem::dumpDir(const char* dir) {
 }
 
 /*virtua*/ size_t FileSystem::write_file(const char* file_path, const RNS::Bytes& data) {
+	res::FlashOp res_flash("write", file_path);
 	TRACEF("write_file: writing to file %s", file_path);
 
 	// Avoid VFS noise: ensure the parent directory exists before
@@ -445,11 +447,13 @@ void FileSystem::dumpDir(const char* dir) {
 }
 
 /*virtua*/ bool FileSystem::remove_file(const char* file_path) {
+	res::FlashOp res_flash("remove", file_path);
 	TRACEF("remove_file: removing file %s", file_path);
 	return FS.remove(file_path);
 }
 
 /*virtua*/ bool FileSystem::rename_file(const char* from_file_path, const char* to_file_path) {
+	res::FlashOp res_flash("rename", to_file_path);
 	TRACEF("rename_file: renaming file %s to %s", from_file_path, to_file_path);
 	return FS.rename(from_file_path, to_file_path);
 }
@@ -479,6 +483,7 @@ void FileSystem::dumpDir(const char* dir) {
 }
 
 /*virtua*/ bool FileSystem::create_directory(const char* directory_path) {
+	res::FlashOp res_flash("mkdir", directory_path);
 	TRACEF("create_directory: creating directory %s", directory_path);
 	if (!FS.mkdir(directory_path)) {
 		ERROR("create_directory: failed to create directory " + std::string(directory_path));
@@ -488,6 +493,7 @@ void FileSystem::dumpDir(const char* dir) {
 }
 
 /*virtua*/ bool FileSystem::remove_directory(const char* directory_path) {
+	res::FlashOp res_flash("rmdir", directory_path);
 	TRACEF("remove_directory: removing directory %s", directory_path);
 #if FS_TYPE == FS_TYPE_INTERNALFS || FS_TYPE == FS_TYPE_FLASHFS
 	if (!FS.rmdir_r(directory_path)) {

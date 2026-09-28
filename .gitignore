@@ -44,3 +44,6 @@ Console/build
 build/*
 .pio/*
 .vscode/*
+
+# Bench load-harness output (tests/bench_load.py)
+tests/bench-results/
