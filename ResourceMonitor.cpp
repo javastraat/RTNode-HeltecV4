@@ -53,6 +53,14 @@ const char* tlsf_location() {
     return esp_ptr_external_ram(pool) ? "psram" : "internal";
 }
 
+// "<used>/<peak>/<size> fb=<malloc fallbacks>", sizes in KB.
+void pool_text(char* out, size_t len) {
+    using RNS::Utilities::OS;
+    snprintf(out, len, "%u/%u/%uK fb=%lu",
+             (unsigned)(OS::heap_pool_used() / 1024), (unsigned)(OS::heap_pool_peak() / 1024),
+             (unsigned)(OS::heap_pool_size() / 1024), (unsigned long)OS::heap_fallback_count());
+}
+
 uint32_t p99_bound_ms(const Window& w) {
     if (w.loops == 0) return 0;
     uint32_t allowed_over = w.loops / 100;  // iterations allowed above the p99 bound
@@ -80,8 +88,10 @@ void report() {
     if (p99 == 0xFFFFFFFF) snprintf(p99_text, sizeof(p99_text), ">1000");
     else snprintf(p99_text, sizeof(p99_text), "<=%lu", (unsigned long)p99);
 
+    char pool[48];
+    pool_text(pool, sizeof(pool));
     Serial.printf(
-        "[RES] t=%lu heap=%u/%u/%u psram=%u/%u tlsf=%s loops=%lu max=%lums p99%sms "
+        "[RES] t=%lu heap=%u/%u/%u psram=%u/%u tlsf=%s pool=%s loops=%lu max=%lums p99%sms "
         "over20=%lu over100=%lu over1000=%lu lora_tx=%lums/%lu flash=%lums/%lu tcp=%lums/%lu "
         "q_hw=%u q_drop=%lu wifi=%d/%d\r\n",
         (unsigned long)millis(),
@@ -91,6 +101,7 @@ void report() {
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
         tlsf_location(),
+        pool,
         (unsigned long)window.loops,
         (unsigned long)(window.loop_max_us / 1000),
         p99_text,
@@ -157,10 +168,13 @@ void loop_end() {
 }
 
 void boot_report() {
-    Serial.printf("[RES] boot psram_size=%u psram_free=%u tlsf=%s internal_free=%u\r\n",
+    char pool[48];
+    pool_text(pool, sizeof(pool));
+    Serial.printf("[RES] boot psram_size=%u psram_free=%u tlsf=%s pool=%s internal_free=%u\r\n",
                   (unsigned)ESP.getPsramSize(),
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                   tlsf_location(),
+                  pool,
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     last_report_ms = millis();
 }

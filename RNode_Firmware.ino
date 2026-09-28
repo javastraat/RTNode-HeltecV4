@@ -470,6 +470,10 @@ static void boundary_apply_heap_relief(uint8_t heap_stage) {
 #endif  // HAS_RNS
 
 void setup() {
+  // Create the Reticulum heap pool (PSRAM on the V4) now that the Arduino core
+  // has brought PSRAM up. C++ static constructors run before that, so anything
+  // they allocated came from malloc() and is freed there.
+  RNS::Utilities::OS::init_heap();
 
   // Initialise serial communication
   memset(serialBuffer, 0, sizeof(serialBuffer));

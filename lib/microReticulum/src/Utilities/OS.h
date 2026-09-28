@@ -118,6 +118,17 @@ namespace RNS { namespace Utilities {
 		static void dump_allocator_stats();
 #endif
 
+		// Creates the TLSF heap pool once PSRAM is up. Call from setup(): C++
+		// static constructors run before the Arduino core initialises PSRAM,
+		// so operator new uses malloc() until this runs.
+		static void init_heap();
+		// TLSF pool size, bytes in use, and peak bytes in use (0 without a pool),
+		// and how many allocations fell back to malloc().
+		static size_t heap_pool_size();
+		static size_t heap_pool_used();
+		static size_t heap_pool_peak();
+		static uint32_t heap_fallback_count();
+
 		inline static void register_filesystem(FileSystem& filesystem) {
 			TRACE("Registering filesystem...");
 			_filesystem = filesystem;

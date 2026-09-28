@@ -32,6 +32,25 @@ bool _tlsf_init = false;
 size_t _buffer_size = BUFFER_SIZE;
 size_t _contiguous_size = 0;
 
+// The pool's address range. operator delete hands a block to tlsf_free() only
+// when it lies inside, so blocks malloc()ed before the pool existed (or after
+// it filled) still go back to free().
+uintptr_t _tlsf_pool_start = 0;
+uintptr_t _tlsf_pool_end = 0;
+size_t _tlsf_used_bytes = 0;
+size_t _tlsf_peak_bytes = 0;
+
+#if defined(ESP32)
+// operator new/delete run on every task (loop, WiFi events, lwIP callbacks)
+// and TLSF has no locking of its own.
+portMUX_TYPE _tlsf_mux = portMUX_INITIALIZER_UNLOCKED;
+#define TLSF_LOCK()   portENTER_CRITICAL_SAFE(&_tlsf_mux)
+#define TLSF_UNLOCK() portEXIT_CRITICAL_SAFE(&_tlsf_mux)
+#else
+#define TLSF_LOCK()
+#define TLSF_UNLOCK()
+#endif
+
 /*static*/ //tlsf_t OS::_tlsf = tlsf_create_with_pool(malloc(1024 * 1024), 1024 * 1024);
 /*static*/ tlsf_t OS::_tlsf = nullptr;
 #endif
@@ -44,80 +63,103 @@ uint32_t _delete_fault = 0;
 size_t _min_size = 0;
 size_t _max_size = 0;
 
+#if defined(RNS_USE_TLSF)
+static void tlsf_create_pool() {
+#if defined(ESP32)
+	// Runtime PSRAM detection — works on boards with or without PSRAM.
+	// Boards with PSRAM (e.g. V4 ESP32-S3FH4R2) get TLSF pool in SPIRAM,
+	// freeing internal SRAM for WiFi/LoRa/stack.
+	// Boards without PSRAM (e.g. V3 ESP32-S3FN8) skip TLSF entirely and
+	// use plain malloc() from internal SRAM — the ~170 KB heap is too small
+	// to dedicate to a TLSF pool while still running WiFi/LoRa/FreeRTOS.
+	size_t psram_size = ESP.getPsramSize();
+	void* raw_buffer = nullptr;
+	if (psram_size > 0) {
+		// PSRAM available — allocate TLSF pool from SPIRAM
+		size_t align = tlsf_align_size();
+		_contiguous_size = ESP.getMaxAllocPsram();
+		TRACEF("PSRAM detected: %u bytes total, %u bytes max contiguous", psram_size, _contiguous_size);
+		if (_buffer_size == 0) {
+			_buffer_size = (_contiguous_size * 4) / 5;
+		}
+		_buffer_size &= ~(align - 1);
+		raw_buffer = heap_caps_aligned_alloc(align, _buffer_size, MALLOC_CAP_SPIRAM);
+	}
+	else {
+		// No PSRAM — skip TLSF, all allocations go through malloc()
+		TRACEF("No PSRAM detected (%u bytes internal heap free), TLSF disabled", ESP.getFreeHeap());
+	}
+#elif defined(ARDUINO_ARCH_NRF52) || defined(ARDUINO_NRF52_ADAFRUIT)
+	_contiguous_size = dbgHeapFree();
+	TRACEF("contiguous_size: %u", _contiguous_size);
+	if (_buffer_size == 0) {
+		_buffer_size = (size_t)(_contiguous_size * BUFFER_FRACTION);
+	}
+	// For NRF52 round to kB
+	_buffer_size = (size_t)(_buffer_size / 1024) * 1024;
+	TRACEF("buffer_size: %u", _buffer_size);
+	void* raw_buffer = malloc(_buffer_size);
+#else
+	_buffer_size = (size_t)BUFFER_SIZE;
+	TRACEF("buffer_size: %u", _buffer_size);
+	void* raw_buffer = malloc(_buffer_size);
+#endif
+	if (raw_buffer == nullptr) {
+		ERROR("-- allocation for tlsf FAILED");
+		//strcpy(_tlsf_msg, "-- allocation for tlsf FAILED!!!");
+	}
+	else {
+#if 1
+		OS::_tlsf = tlsf_create_with_pool(raw_buffer, _buffer_size);
+		//if (OS::_tlsf == nullptr) {
+		//	sprintf(_tlsf_msg, "initialization of tlsf with align=%d, contiguous=%d, size=%d FAILED!!!", tlsf_align_size(), _contiguous_size, _buffer_size);
+		//}
+		//else {
+		//	sprintf(_tlsf_msg, "initialization of tlsf with align=%d, contiguous=%d, size=%d SUCCESSFUL!!!", tlsf_align_size(), _contiguous_size, _buffer_size);
+		//}
+#else
+		Serial.print("raw_buffer: ");
+		Serial.println((long)raw_buffer);
+		Serial.print("align_size: ");
+		Serial.println((long)tlsf_align_size());
+		void* aligned_buffer = (void*)(((size_t)raw_buffer + (tlsf_align_size() - 1)) & ~(tlsf_align_size() - 1));
+		Serial.print("aligned_buffer: ");
+		Serial.println((long)aligned_buffer);
+		OS::_tlsf = tlsf_create_with_pool(aligned_buffer, BUFFER_SIZE-(size_t)((uint32_t)aligned_buffer - (uint32_t)raw_buffer));
+		//tlfs = tlsf_create_with_pool(aligned_buffer, buffer_size--(size_t)((uint32_t)aligned_buffer - (uint32_t)raw_buffer));
+#endif
+		if (OS::_tlsf == nullptr) {
+			ERROR("-- initialization of tlsf FAILED");
+		}
+	}
+	if (OS::_tlsf != nullptr) {
+		_tlsf_pool_start = (uintptr_t)raw_buffer;
+		_tlsf_pool_end = _tlsf_pool_start + _buffer_size;
+	}
+}
+#endif
+
+/*static*/ void OS::init_heap() {
+#if defined(RNS_USE_TLSF) && defined(ESP32)
+	// The Arduino core brings PSRAM up in initArduino(), after C++ static
+	// constructors have run, so the first operator new cannot tell whether
+	// PSRAM exists. setup() calls this once it can; until then operator new
+	// uses malloc().
+	if (!_tlsf_init) {
+		_tlsf_init = true;
+		tlsf_create_pool();
+	}
+#endif
+}
+
 // CBA Added attribute weak to avoid collision with new override on nrf52
 void* operator new(size_t size) {
 //__attribute__((weak)) void* operator new(size_t size) {
-#if defined(RNS_USE_TLSF)
+#if defined(RNS_USE_TLSF) && !defined(ESP32)
 	//if (OS::_tlsf == nullptr) {
 	if (!_tlsf_init) {
 		_tlsf_init = true;
-#if defined(ESP32)
-		// Runtime PSRAM detection — works on boards with or without PSRAM.
-		// Boards with PSRAM (e.g. V4 ESP32-S3FH4R2) get TLSF pool in SPIRAM,
-		// freeing internal SRAM for WiFi/LoRa/stack.
-		// Boards without PSRAM (e.g. V3 ESP32-S3FN8) skip TLSF entirely and
-		// use plain malloc() from internal SRAM — the ~170 KB heap is too small
-		// to dedicate to a TLSF pool while still running WiFi/LoRa/FreeRTOS.
-		size_t psram_size = ESP.getPsramSize();
-		void* raw_buffer = nullptr;
-		if (psram_size > 0) {
-			// PSRAM available — allocate TLSF pool from SPIRAM
-			size_t align = tlsf_align_size();
-			_contiguous_size = ESP.getMaxAllocPsram();
-			TRACEF("PSRAM detected: %u bytes total, %u bytes max contiguous", psram_size, _contiguous_size);
-			if (_buffer_size == 0) {
-				_buffer_size = (_contiguous_size * 4) / 5;
-			}
-			_buffer_size &= ~(align - 1);
-			raw_buffer = heap_caps_aligned_alloc(align, _buffer_size, MALLOC_CAP_SPIRAM);
-		}
-		else {
-			// No PSRAM — skip TLSF, all allocations go through malloc()
-			TRACEF("No PSRAM detected (%u bytes internal heap free), TLSF disabled", ESP.getFreeHeap());
-		}
-#elif defined(ARDUINO_ARCH_NRF52) || defined(ARDUINO_NRF52_ADAFRUIT)
-		_contiguous_size = dbgHeapFree();
-		TRACEF("contiguous_size: %u", _contiguous_size);
-		if (_buffer_size == 0) {
-			_buffer_size = (size_t)(_contiguous_size * BUFFER_FRACTION);
-		}
-		// For NRF52 round to kB
-		_buffer_size = (size_t)(_buffer_size / 1024) * 1024;
-		TRACEF("buffer_size: %u", _buffer_size);
-		void* raw_buffer = malloc(_buffer_size);
-#else
-		_buffer_size = (size_t)BUFFER_SIZE;
-		TRACEF("buffer_size: %u", _buffer_size);
-		void* raw_buffer = malloc(_buffer_size);
-#endif
-		if (raw_buffer == nullptr) {
-			ERROR("-- allocation for tlsf FAILED");
-			//strcpy(_tlsf_msg, "-- allocation for tlsf FAILED!!!");
-		}
-		else {
-#if 1
-			OS::_tlsf = tlsf_create_with_pool(raw_buffer, _buffer_size);
-			//if (OS::_tlsf == nullptr) {
-			//	sprintf(_tlsf_msg, "initialization of tlsf with align=%d, contiguous=%d, size=%d FAILED!!!", tlsf_align_size(), _contiguous_size, _buffer_size);
-			//}
-			//else {
-			//	sprintf(_tlsf_msg, "initialization of tlsf with align=%d, contiguous=%d, size=%d SUCCESSFUL!!!", tlsf_align_size(), _contiguous_size, _buffer_size);
-			//}
-#else
-			Serial.print("raw_buffer: ");
-			Serial.println((long)raw_buffer);
-			Serial.print("align_size: ");
-			Serial.println((long)tlsf_align_size());
-			void* aligned_buffer = (void*)(((size_t)raw_buffer + (tlsf_align_size() - 1)) & ~(tlsf_align_size() - 1));
-			Serial.print("aligned_buffer: ");
-			Serial.println((long)aligned_buffer);
-			OS::_tlsf = tlsf_create_with_pool(aligned_buffer, BUFFER_SIZE-(size_t)((uint32_t)aligned_buffer - (uint32_t)raw_buffer));
-			//tlfs = tlsf_create_with_pool(aligned_buffer, buffer_size--(size_t)((uint32_t)aligned_buffer - (uint32_t)raw_buffer));
-#endif
-			if (OS::_tlsf == nullptr) {
-				ERROR("-- initialization of tlsf FAILED");
-			}
-		}
+		tlsf_create_pool();
 	}
 #endif
 	++_new_count;
@@ -129,17 +171,22 @@ void* operator new(size_t size) {
 	if (size < 4192 && size > _max_size) {
 		_max_size = size;
 	}
-	void* p;
+	void* p = nullptr;
 #if defined(RNS_USE_TLSF)
 	if (OS::_tlsf != nullptr) {
-		//TRACEF("--- allocating memory from tlsf (%u bytes)", size);
-    	p = tlsf_malloc(OS::_tlsf, size);
-		//TRACEF("--- allocated memory from tlsf (%u bytes) (addr=%lx)", size, p);
+		TLSF_LOCK();
+		p = tlsf_malloc(OS::_tlsf, size);
+		if (p != nullptr) {
+			_tlsf_used_bytes += tlsf_block_size(p);
+			if (_tlsf_used_bytes > _tlsf_peak_bytes) {
+				_tlsf_peak_bytes = _tlsf_used_bytes;
+			}
+		}
+		TLSF_UNLOCK();
 	}
-	else {
-		//TRACEF("--- allocating memory (%u bytes)", size);
+	if (p == nullptr) {
+		// No pool yet, no pool on this board, or the pool is full.
 		p = malloc(size);
-		//TRACEF("--- allocated memory (%u bytes) (addr=%lx)", size, p);
 		++_new_fault;
 	}
 #else
@@ -154,9 +201,12 @@ void* operator new(size_t size) {
 void operator delete(void* p) {
 //__attribute__((weak)) void operator delete(void* p) {
 #if defined(RNS_USE_TLSF)
-	if (OS::_tlsf != nullptr) {
-		//TRACEF("--- freeing memory from tlsf (addr=%lx)", p);
+	uintptr_t address = (uintptr_t)p;
+	if (OS::_tlsf != nullptr && address >= _tlsf_pool_start && address < _tlsf_pool_end) {
+		TLSF_LOCK();
+		_tlsf_used_bytes -= tlsf_block_size(p);
 		tlsf_free(OS::_tlsf, p);
+		TLSF_UNLOCK();
 	}
 	else {
 		//TRACEF("--- freeing memory (addr=%lx)", p);
@@ -206,10 +256,14 @@ void dump_tlsf_stats() {
 	_tlsf_free_size = 0;
 	_tlsf_free_max_size = 0;
 	//TRACEF("TLSF Message: %s", _tlsf_msg);
-	if (OS::_tlsf == nullptr) {
+	// The walk visits every block with the pool locked, so only pay for it
+	// when the TRACE output it feeds will actually be printed.
+	if (OS::_tlsf == nullptr || loglevel() < LOG_TRACE) {
 		return;
 	}
+	TLSF_LOCK();
 	tlsf_walk_pool(tlsf_get_pool(OS::_tlsf), tlsf_mem_walker, nullptr);
+	TLSF_UNLOCK();
 	HEAD("TLSF Stats", LOG_TRACE);
 	TRACEF("Buffer Size:     %u", _buffer_size);
 	TRACEF("Contiguous Size: %u", _contiguous_size);
@@ -220,6 +274,34 @@ void dump_tlsf_stats() {
 	TRACEF("Max Free Size:   %u (%u%% fragmented)\n", _tlsf_free_max_size, (unsigned)(100.0 - (double)_tlsf_free_max_size / (double)_tlsf_free_size * 100.0));
 }
 #endif
+
+/*static*/ size_t OS::heap_pool_size() {
+#if defined(RNS_USE_TLSF)
+	return OS::_tlsf != nullptr ? _buffer_size : 0;
+#else
+	return 0;
+#endif
+}
+
+/*static*/ size_t OS::heap_pool_used() {
+#if defined(RNS_USE_TLSF)
+	return _tlsf_used_bytes;
+#else
+	return 0;
+#endif
+}
+
+/*static*/ size_t OS::heap_pool_peak() {
+#if defined(RNS_USE_TLSF)
+	return _tlsf_peak_bytes;
+#else
+	return 0;
+#endif
+}
+
+/*static*/ uint32_t OS::heap_fallback_count() {
+	return _new_fault;
+}
 
 /*static*/ void OS::dump_allocator_stats() {
 	HEAD("Allocator Stats", LOG_TRACE);
@@ -235,6 +317,14 @@ void dump_tlsf_stats() {
 	dump_tlsf_stats();
 #endif
 }
+
+#else
+
+/*static*/ void OS::init_heap() {}
+/*static*/ size_t OS::heap_pool_size() { return 0; }
+/*static*/ size_t OS::heap_pool_used() { return 0; }
+/*static*/ size_t OS::heap_pool_peak() { return 0; }
+/*static*/ uint32_t OS::heap_fallback_count() { return 0; }
 
 #endif	// RNS_USE_ALLOCATOR
 
