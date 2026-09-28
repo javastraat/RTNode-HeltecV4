@@ -1,0 +1,4 @@
+# prnsd keeps its identity and state beside its config; only the config is tracked.
+*
+!config
+!.gitignore

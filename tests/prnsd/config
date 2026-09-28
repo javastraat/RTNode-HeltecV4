@@ -1,0 +1,21 @@
+# prnsd for the RTNode Bluetooth bench (tests/bench_ble_rns.py --via prnsd):
+# Prns's Bluetooth to RTNode, and a loopback port for the test client.
+# Nothing else, so nothing reaches a public network.
+[reticulum]
+  enable_transport = Yes
+  share_instance = No
+  panic_on_interface_error = No
+
+[logging]
+  loglevel = 5
+
+[interfaces]
+  [[Nearby Prns peers]]
+    type = PrnsBluetoothAuto
+    enabled = Yes
+
+  [[Bench test port]]
+    type = TCPServerInterface
+    enabled = Yes
+    listen_ip = 127.0.0.1
+    listen_port = 4270

@@ -17,6 +17,16 @@ Checks, each within a time limit:
 --chunk caps the relay's fragment payload, so A's packets reach the node in
 several fragments. Needs a V4 bench build with Bluetooth on (the default)
 and the peer running with --serve.
+
+--via prnsd puts Prns in the relay's place: A connects to a prnsd on this
+Mac, which reaches the node with Prns's own protocol. Run it from Terminal
+(macOS gives Bluetooth only to apps it can ask):
+
+    <Prns checkout>/prnsd/target/release/prnsd run --config tests/prnsd
+
+tests/prnsd/config enables only Prns Bluetooth and a loopback port, so the
+bench stays off every public network.
+--node-log waits for the node's serial log to show the Prns peer first.
 """
 import argparse
 import json
@@ -84,13 +94,34 @@ def peer_events(since):
         return []
 
 
+def run_via_prnsd(args):
+    if args.node_log:
+        def prns_peer():
+            try:
+                with open(args.node_log) as f:
+                    return next((line for line in f if "Prns peer" in line and "identified" in line), None)
+            except OSError:
+                return None
+        line = wait_for(prns_peer, 120)
+        if not line:
+            sys.exit("FAIL: the node never identified a Prns peer (is prnsd running?)")
+        print("node: " + line.split("] ", 1)[-1].strip(), flush=True)
+    a_interface = ("  [[prnsd]]\n    type = TCPClientInterface\n    enabled = yes\n    ingress_control = No\n"
+                   f"    target_host = 127.0.0.1\n    target_port = {args.prnsd_port}\n")
+    return exchange(args, a_interface, time.time(), "prnsd")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, default=4242)
     parser.add_argument("--chunk", type=int, default=512, help="relay fragment cap (with header)")
+    parser.add_argument("--via", choices=["relay", "prnsd"], default="relay")
+    parser.add_argument("--prnsd-port", type=int, default=4270)
+    parser.add_argument("--node-log", help="node serial log to watch for the Prns peer (--via prnsd)")
     args = parser.parse_args()
-    results = {}
+    if args.via == "prnsd":
+        return run_via_prnsd(args)
 
     # The relay first: A's interface must be up before B announces. End any
     # session still running, so this one starts with this run's settings.
@@ -107,11 +138,17 @@ def main():
     print(f"relay up: node identity {relay['node_identity'][:8]}, MTU {relay['mtu']}, fragment payload {relay['chunk']}",
           flush=True)
 
+    a_interface = ("  [[BLE relay]]\n    type = UDPInterface\n    enabled = yes\n"
+                   "    ingress_control = No\n    listen_ip = 127.0.0.1\n"
+                   f"    listen_port = {UDP_OUT}\n    forward_ip = 127.0.0.1\n    forward_port = {UDP_IN}\n")
+    return exchange(args, a_interface, started, "relay")
+
+
+def exchange(args, a_interface, started, via):
+    results = {}
     import RNS
     work = tempfile.mkdtemp(prefix="rtnode-ble-rns-")
-    config(os.path.join(work, "a"), "  [[BLE relay]]\n    type = UDPInterface\n    enabled = yes\n"
-           "    ingress_control = No\n    listen_ip = 127.0.0.1\n"
-           f"    listen_port = {UDP_OUT}\n    forward_ip = 127.0.0.1\n    forward_port = {UDP_IN}\n")
+    config(os.path.join(work, "a"), a_interface)
     config(os.path.join(work, "b"), "  [[RTNode TCP]]\n    type = TCPClientInterface\n    enabled = yes\n"
            f"    ingress_control = No\n    target_host = {args.host}\n    target_port = {args.port}\n")
     RNS.Reticulum(os.path.join(work, "a"))
@@ -196,14 +233,14 @@ def main():
     finally:
         b.kill()
 
-    relay_down = peer_events(started)
-    stats = [e for e in relay_down if e.get("event") == "relay"]
-    if stats:
-        print(f"relay: {stats[-1]}", flush=True)
+    if via == "relay":
+        stats = [e for e in peer_events(started) if e.get("event") == "relay"]
+        if stats:
+            print(f"relay: {stats[-1]}", flush=True)
     for failure in failures:
         print("FAIL: " + failure, flush=True)
     if not failures:
-        print("PASS: announces both ways and a Link across RTNode's Bluetooth interface", flush=True)
+        print(f"PASS: announces both ways and a Link across RTNode's Bluetooth interface (via {via})", flush=True)
     os._exit(1 if failures else 0)
 
 
