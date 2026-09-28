@@ -2112,6 +2112,7 @@ static uint32_t ingress_dropped = 0;
 					bool is_from_backbone = is_backbone_interface(packet.receiving_interface());
 					if (!is_from_backbone) {
 						const PathEntry* entry = select_path(packet.destination_hash());
+						bool in_range = false;
 						if (entry) {
 							Interface outbound_interface = find_interface_from_hash(entry->receiving_interface);
 							NOTICE("[" + std::string(pkt_type_name(packet.packet_type())) + "] - FROM: " + packet.receiving_interface().toString() + " (" + zone_tag(is_backbone_interface(packet.receiving_interface())) + ") - TO: " + short_hash(packet.destination_hash()) + " (" + dest_zone(packet.destination_hash()) + ") - FWD: " + (outbound_interface ? outbound_interface.toString() : "?") + " (" + (outbound_interface ? zone_tag(is_backbone_interface(outbound_interface)) : "?") + ") hops=" + std::to_string(entry->hops));
@@ -2123,6 +2124,20 @@ static uint32_t ingress_dropped = 0;
 								request_path(packet.destination_hash());
 								return;
 							}
+							// A packet with no transport header names no next hop: its
+							// sender reckons the destination in range, and the path
+							// says so too when it leads back out of the interface the
+							// packet came in on. Two LoRa devices talking directly
+							// then had every packet, link request and link packet sent
+							// again by this node (tests/bench_lora_neighbour.py).
+							// Python RNS never relays such a packet at all.
+							if (outbound_interface == packet.receiving_interface()) {
+								NOTICE("SKIP-FWD - TO: " + short_hash(packet.destination_hash()) + " is in range of its sender on " + outbound_interface.toString());
+								in_range = true;
+							}
+						}
+						if (entry && !in_range) {
+							Interface outbound_interface = find_interface_from_hash(entry->receiving_interface);
 							Bytes next_hop = entry->next_hop;
 							uint8_t remaining_hops = entry->hops;
 
@@ -2213,7 +2228,7 @@ static uint32_t ingress_dropped = 0;
 								}
 							}
 						}
-						else {
+						else if (!entry) {
 							// Only request path if the destination is not a link_id
 							// (link data packets are handled by link transport below,
 							// not by standard transport path lookup).
