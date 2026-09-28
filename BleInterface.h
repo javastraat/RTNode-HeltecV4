@@ -2,21 +2,27 @@
 //  BleInterface.h — Bluetooth LE peers for RTNode (PERFORMANCE_STRATEGY.md,
 //  order of work step 7). V4 firewall builds with RTNODE_BLE.
 //
-//  Speaks ble-reticulum's protocol v2.2 — Columba's — as a GATT peripheral,
-//  and advertises v0.3.0's peripheral-only flag so that centrals (Columba
-//  phones, Prns) connect to us and RTNode never has to connect out:
+//  A GATT peripheral speaking two protocols on one service, and advertising
+//  ble-reticulum v0.3.0's peripheral-only flag so that centrals connect to
+//  us and RTNode never has to connect out:
 //
 //    service   37145b00-442d-4a94-917f-8f42c5da28e3
-//    TX  …e4   read, notify   us → central: fragments
-//    RX  …e5   write          central → us: identity, then fragments
-//    ID  …e6   read           our 16-byte Reticulum transport identity hash
+//    TX  …e4   read, notify   Columba: us → central, fragments
+//    RX  …e5   write          Columba: central → us, identity then fragments
+//    ID  …e6   read           Columba: our 16-byte transport identity hash
+//    CTL …e7   write, notify  Prns: Hello → Welcome (or Close)
+//    DAT …e8   write, notify  Prns: fragments, both ways
 //
-//  A central's first write of exactly 16 bytes is its identity. After that,
-//  every write is a fragment: [type][sequence u16 BE][total u16 BE][data],
-//  type 01 start, 02 continue, 03 end; a packet that fits one fragment is 01
-//  with total 1. A 1-byte 0x00 write is a keepalive. Reference: ble-reticulum
-//  07d9413 (BLEFragmentation.py, BLE_PROTOCOL_v2.2.md, _v0.3.0.md), as pinned
-//  by Columba 2.2.6.
+//  Columba (ble-reticulum v2.2, 07d9413, as pinned by Columba 2.2.6): a
+//  central's first write of exactly 16 bytes to RX is its identity; a 1-byte
+//  0x00 write is a keepalive. Prns (d48e9fc, prns-core bluetooth_auto): the
+//  central writes a 23-byte Hello to CTL — [01][identity 16][endpoint 2]
+//  [L2CAP PSM][link MTU u16 BE][RSSI] — and we answer Welcome ([02], ours)
+//  by notification, or Close [03][reason] if it is our own identity. A
+//  central that finds CTL uses Prns's protocol, otherwise Columba's. Both
+//  frame data the same way: [type][sequence u16 BE][total u16 BE][data],
+//  type 01 start, 02 continue, 03 end; a one-fragment packet is 01 with
+//  total 1.
 //
 //  Each peer holds one of BLE_SLOTS fixed slots, and each slot is its own
 //  Reticulum interface, registered at boot and online while its peer is
@@ -55,6 +61,18 @@ static const char* SERVICE_UUID  = "37145b00-442d-4a94-917f-8f42c5da28e3";
 static const char* TX_UUID       = "37145b00-442d-4a94-917f-8f42c5da28e4";
 static const char* RX_UUID       = "37145b00-442d-4a94-917f-8f42c5da28e5";
 static const char* IDENTITY_UUID = "37145b00-442d-4a94-917f-8f42c5da28e6";
+static const char* CONTROL_UUID  = "37145b00-442d-4a94-917f-8f42c5da28e7";
+static const char* DATA_UUID     = "37145b00-442d-4a94-917f-8f42c5da28e8";
+
+// Prns control messages (prns-core bluetooth_auto/handshake.rs).
+static const uint8_t  CONTROL_HELLO   = 0x01;
+static const uint8_t  CONTROL_WELCOME = 0x02;
+static const uint8_t  CONTROL_CLOSE   = 0x03;
+static const uint8_t  CLOSE_SELF_CONNECTION = 0x01;
+static const size_t   GREETING_LEN    = 23;
+static const uint8_t  ENDPOINT_ESP32[2] = {0x05, 0x00};
+static const uint16_t PRNS_LINK_MTU   = 500;
+static const uint8_t  RSSI_UNKNOWN    = 0x80;
 
 static const uint8_t  FRAG_START    = 0x01;
 static const uint8_t  FRAG_CONTINUE = 0x02;
@@ -79,9 +97,11 @@ struct ControlEvent {
     uint16_t conn;
     uint16_t value;    // MTU, or disconnect reason
 };
+enum Channel : uint8_t { CHANNEL_COLUMBA_RX, CHANNEL_CONTROL, CHANNEL_DATA };
 struct WriteEvent {
     uint16_t conn;
     uint16_t len;
+    uint8_t  channel;
     uint8_t  data[VALUE_MAX];
 };
 
@@ -103,9 +123,12 @@ public:
         _bitrate = 700000;   // Columba's BLEInterface.BITRATE_GUESS
     }
 
+    enum Protocol : uint8_t { PROTOCOL_COLUMBA, PROTOCOL_PRNS };
+
     // Peer state, owned by loop().
     bool     used = false;
     bool     identified = false;
+    Protocol protocol = PROTOCOL_COLUMBA;
     uint16_t conn = 0;
     uint16_t att_mtu = 23;
     uint8_t  identity[IDENTITY_LEN] = {};
@@ -125,7 +148,7 @@ public:
     // Counters since boot.
     uint32_t rx_packets = 0, rx_bytes = 0, tx_packets = 0, tx_bytes = 0;
     uint32_t tx_drops = 0, bad_fragments = 0, keepalives = 0, before_identity = 0;
-    uint32_t enomem = 0, notify_errors = 0, peers = 0;
+    uint32_t enomem = 0, notify_errors = 0, peers = 0, prns_peers = 0, bad_control = 0;
 
     void attach(uint16_t handle) {
         used = true;
@@ -150,10 +173,12 @@ public:
         _ingress = RNS::IngressState();
     }
 
-    void set_online() {
+    void set_online(Protocol which) {
         identified = true;
+        protocol = which;
         _online = true;
         peers++;
+        if (which == PROTOCOL_PRNS) prns_peers++;
     }
 
     std::string label() const { return toString(); }
@@ -184,6 +209,8 @@ protected:
 static BlePeerInterface*     slots[SLOTS] = {};
 static std::vector<RNS::Interface> slot_interfaces;   // Transport's handles; they own the slots
 static NimBLECharacteristic* tx_char = nullptr;
+static NimBLECharacteristic* control_char = nullptr;
+static NimBLECharacteristic* data_char = nullptr;
 static uint8_t               our_identity[IDENTITY_LEN];
 static uint32_t              orphan_writes = 0, self_connections = 0, replaced = 0;
 static uint32_t              last_report_ms = 0;
@@ -231,16 +258,23 @@ static int on_gap_event(ble_gap_event* event, void* arg) {
     return 0;
 }
 
-class RxCallbacks : public NimBLECharacteristicCallbacks {
+class WriteCallbacks : public NimBLECharacteristicCallbacks {
+public:
+    explicit WriteCallbacks(Channel which) : channel(which) {}
     void onWrite(NimBLECharacteristic* characteristic, ble_gap_conn_desc* desc) override {
         NimBLEAttValue value = characteristic->getValue();
         host_write.conn = desc->conn_handle;
+        host_write.channel = channel;
         host_write.len = value.length() < VALUE_MAX ? value.length() : VALUE_MAX;
         memcpy(host_write.data, value.data(), host_write.len);
         if (xQueueSend(write_queue, &host_write, 0) != pdTRUE) write_drops++;
     }
+private:
+    Channel channel;
 };
-static RxCallbacks rx_callbacks;
+static WriteCallbacks rx_callbacks(CHANNEL_COLUMBA_RX);
+static WriteCallbacks control_callbacks(CHANNEL_CONTROL);
+static WriteCallbacks data_callbacks(CHANNEL_DATA);
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
 // Before Reticulum starts: the slots' interfaces, offline until a peer comes.
@@ -285,6 +319,10 @@ inline void start() {
     rx_char->setCallbacks(&rx_callbacks);
     NimBLECharacteristic* id_char = service->createCharacteristic(IDENTITY_UUID, NIMBLE_PROPERTY::READ);
     id_char->setValue(our_identity, IDENTITY_LEN);
+    control_char = service->createCharacteristic(CONTROL_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
+    control_char->setCallbacks(&control_callbacks);
+    data_char = service->createCharacteristic(DATA_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
+    data_char->setCallbacks(&data_callbacks);
     service->start();
 
     NimBLEAdvertisementData data;
@@ -339,11 +377,22 @@ static void on_disconnect(uint16_t conn, uint16_t reason) {
     slot->release();
 }
 
-// The central's identity: its first write of exactly 16 bytes.
-static void on_identity(int index, const uint8_t* identity) {
+static bool notify(uint16_t conn, NimBLECharacteristic* characteristic, const uint8_t* data, size_t len) {
+    os_mbuf* om = ble_hs_mbuf_from_flat(data, len);
+    if (!om) return false;
+    return ble_gattc_notify_custom(conn, characteristic->getHandle(), om) == 0;   // consumes om
+}
+
+// The central's identity: its first 16-byte write to RX (Columba), or the
+// identity in its Hello (Prns).
+static void on_identity(int index, const uint8_t* identity, BlePeerInterface::Protocol protocol) {
     BlePeerInterface* slot = slots[index];
     if (memcmp(identity, our_identity, IDENTITY_LEN) == 0) {
         self_connections++;
+        if (protocol == BlePeerInterface::PROTOCOL_PRNS) {
+            const uint8_t close[2] = {CONTROL_CLOSE, CLOSE_SELF_CONNECTION};
+            notify(slot->conn, control_char, close, sizeof(close));
+        }
         NimBLEDevice::getServer()->disconnect(slot->conn);
         return;
     }
@@ -357,9 +406,39 @@ static void on_identity(int index, const uint8_t* identity) {
         }
     }
     memcpy(slot->identity, identity, IDENTITY_LEN);
-    slot->set_online();
-    Serial.printf("[BLE] %s: peer %s identified, MTU %u\r\n",
-                  slot->label().c_str(), short_identity(identity).c_str(), (unsigned)slot->att_mtu);
+    slot->set_online(protocol);
+    Serial.printf("[BLE] %s: %s peer %s identified, MTU %u\r\n", slot->label().c_str(),
+                  protocol == BlePeerInterface::PROTOCOL_PRNS ? "Prns" : "Columba",
+                  short_identity(identity).c_str(), (unsigned)slot->att_mtu);
+}
+
+// A Prns Hello, answered with our Welcome.
+static void on_control(int index, const uint8_t* data, size_t len) {
+    BlePeerInterface* slot = slots[index];
+    if (len >= 2 && data[0] == CONTROL_CLOSE) {
+        NimBLEDevice::getServer()->disconnect(slot->conn);
+        return;
+    }
+    if (slot->identified || len < GREETING_LEN || data[0] != CONTROL_HELLO) {
+        slot->bad_control++;
+        return;
+    }
+    uint8_t welcome[GREETING_LEN];
+    welcome[0] = CONTROL_WELCOME;
+    memcpy(welcome + 1, our_identity, IDENTITY_LEN);
+    memcpy(welcome + 1 + IDENTITY_LEN, ENDPOINT_ESP32, sizeof(ENDPOINT_ESP32));
+    welcome[19] = 0x00;                    // no L2CAP channel
+    welcome[20] = PRNS_LINK_MTU >> 8;
+    welcome[21] = PRNS_LINK_MTU & 0xFF;
+    welcome[22] = RSSI_UNKNOWN;
+    const uint8_t* identity = data + 1;
+    if (memcmp(identity, our_identity, IDENTITY_LEN) != 0 && !notify(slot->conn, control_char, welcome, sizeof(welcome))) {
+        // The Welcome could not go out, so the link would never settle.
+        slot->notify_errors++;
+        NimBLEDevice::getServer()->disconnect(slot->conn);
+        return;
+    }
+    on_identity(index, identity, BlePeerInterface::PROTOCOL_PRNS);
 }
 
 static void on_write(const WriteEvent& write) {
@@ -371,13 +450,28 @@ static void on_write(const WriteEvent& write) {
     }
     const uint8_t* data = write.data;
     size_t len = write.len;
+    if (write.channel == CHANNEL_CONTROL) {
+        on_control(index, data, len);
+        return;
+    }
     if (len == 1 && data[0] == 0x00) {
         slot->keepalives++;
         return;
     }
     if (!slot->identified) {
-        if (len == IDENTITY_LEN) on_identity(index, data);
-        else slot->before_identity++;
+        if (write.channel == CHANNEL_COLUMBA_RX && len == IDENTITY_LEN) {
+            on_identity(index, data, BlePeerInterface::PROTOCOL_COLUMBA);
+        }
+        else {
+            slot->before_identity++;
+        }
+        return;
+    }
+    // Each protocol's fragments arrive on its own characteristic.
+    bool expected = slot->protocol == BlePeerInterface::PROTOCOL_PRNS ? write.channel == CHANNEL_DATA
+                                                                        : write.channel == CHANNEL_COLUMBA_RX;
+    if (!expected) {
+        slot->bad_fragments++;
         return;
     }
     if (len < FRAG_HEADER) {
@@ -449,7 +543,8 @@ static void send_next_fragment(BlePeerInterface* slot) {
         slot->enomem++;
         return;
     }
-    int rc = ble_gattc_notify_custom(slot->conn, tx_char->getHandle(), om);   // consumes om
+    NimBLECharacteristic* out = slot->protocol == BlePeerInterface::PROTOCOL_PRNS ? data_char : tx_char;
+    int rc = ble_gattc_notify_custom(slot->conn, out->getHandle(), om);   // consumes om
     if (rc == BLE_HS_ENOMEM) {
         slot->enomem++;
         return;
@@ -480,13 +575,15 @@ static void report() {
     for (int i = 0; i < SLOTS; i++) {
         BlePeerInterface* s = slots[i];
         if (!s->used && s->peers == 0) continue;
-        Serial.printf("[BLE]   %s %s peer %s mtu %u peers %lu rx %lu/%lu tx %lu/%lu queued %u "
-                      "drops %lu bad %lu keepalive %lu early %lu enomem %lu errors %lu\r\n",
+        Serial.printf("[BLE]   %s %s %s peer %s mtu %u peers %lu (prns %lu) rx %lu/%lu tx %lu/%lu queued %u "
+                      "drops %lu bad %lu/%lu keepalive %lu early %lu enomem %lu errors %lu\r\n",
                       s->label().c_str(), s->used ? (s->identified ? "up" : "joining") : "free",
+                      s->identified ? (s->protocol == BlePeerInterface::PROTOCOL_PRNS ? "prns" : "columba") : "-",
                       s->identified ? short_identity(s->identity).c_str() : "-", (unsigned)s->att_mtu,
-                      (unsigned long)s->peers, (unsigned long)s->rx_packets, (unsigned long)s->rx_bytes,
+                      (unsigned long)s->peers, (unsigned long)s->prns_peers,
+                      (unsigned long)s->rx_packets, (unsigned long)s->rx_bytes,
                       (unsigned long)s->tx_packets, (unsigned long)s->tx_bytes, (unsigned)s->tx_count,
-                      (unsigned long)s->tx_drops, (unsigned long)s->bad_fragments,
+                      (unsigned long)s->tx_drops, (unsigned long)s->bad_fragments, (unsigned long)s->bad_control,
                       (unsigned long)s->keepalives, (unsigned long)s->before_identity,
                       (unsigned long)s->enomem, (unsigned long)s->notify_errors);
     }
