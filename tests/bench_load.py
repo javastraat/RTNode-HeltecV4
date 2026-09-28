@@ -135,15 +135,21 @@ def percentile(values, fraction):
 def summarise(args, serial_lines, ping_lines, flood_lines, window_start, window_end, ping_start):
     summary = {"scenario": args.scenario, "rate": args.rate, "duration_s": args.duration}
 
-    # Ping: every sequence number gets a reply or a timeout line on macOS.
-    replies, rtts = set(), []
+    # Ping: every sequence number gets a reply or a timeout line on macOS, so
+    # the highest one seen says how many were sent (ping runs a little slower
+    # than its nominal interval, so elapsed time over-counts).
+    replies, rtts, highest = set(), [], -1
     for _, text in ping_lines:
         match = re.search(r"icmp_seq=(\d+) .*time=([\d.]+) ms", text)
         if match:
             replies.add(int(match.group(1)))
             rtts.append(float(match.group(2)))
-    sent = int((window_end - ping_start) / PING_INTERVAL) - 5  # ignore the last second
-    lost = [seq for seq in range(max(sent, 0)) if seq not in replies]
+            highest = max(highest, int(match.group(1)))
+        match = re.search(r"Request timeout for icmp_seq (\d+)", text)
+        if match:
+            highest = max(highest, int(match.group(1)))
+    sent = highest + 1
+    lost = [seq for seq in range(sent) if seq not in replies]
     summary["ping"] = {
         "sent": sent,
         "lost": len(lost),

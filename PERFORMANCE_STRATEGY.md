@@ -224,6 +224,18 @@ Read-only investigation, 2026-09-27. "Proven" means read in the code;
 - The reporter's setup is the CORE_PRINCIPLES hazard exactly: a transport
   `rnsd` on the trusted LAN side relaying backbone announces.
 
+**Ping loss correction.** Until 2026-09-27 evening the harness estimated
+pings sent from elapsed time; ping runs slightly slower than 5/s, so the last
+~20 always counted as lost. Losses above are recounted from sequence numbers
+(ping's own statistics agree).
+
+**Found while testing the cache:** once flood announces fill the path table
+(24 destinations), a new destination arriving on the same interface with the
+same hop count scores the same as the flood entries, and `cull_path_table()`
+can evict it at once — a legitimate peer is locked out until the flood's
+entries expire. The ingress budget (rule 6) and a recency tie-break in the
+cull are the fixes to evaluate.
+
 **Fix direction** (each measured on its own, rule 1)
 
 - Event-driven LoRa TX: route TxDone to DIO1, send one packet per TxDone
@@ -380,5 +392,6 @@ Each step's results go in the log below before the next step starts.
 |---|---|---|---|---|---|---|---|---|
 | 2026-09-27 | v1.0.50 + inst (60b1aad) | V4.2 | A idle 10 min | 198 KB | ≤ 1 ms / 212 ms | 0 % / 182 ms | 0 | modem-sleep RTT; display ~6 pushes/s |
 | 2026-09-27 | v1.0.50 + inst (60b1aad) | V4.2 | B flood 1/s 5 min | 3.5 KB | ≤ 5 ms / 58.5 s | 73 % / — | 1 | WiFi wedged from +82 s until reboot; 20 LoRa queue drops |
-| 2026-09-27 | + PSRAM heap (072c873) | V4.2 | B flood 1/s 5 min | 191 KB | ≤ 5 ms / 58.9 s | 4.1 % / 209 ms | 1 | WiFi healthy; PSRAM 2.06→1.69 MB free; **task-watchdog reboot at +282 s** (LoRa flush > 60 s); 40 queue drops |
-| 2026-09-27 | + event-driven LoRa TX | V4.2 | B flood 1/s 5 min | 191 KB | ≤ 1 ms / 17.4 s | 1.5 % / 186 ms | 0 | LoRa TX blocks loop 10–16 ms/min (was up to 85 s); no reboot; stalls now the once-a-minute cache cleanup: 69–90 deletes + ~8 s unattributed each; 300 cache writes, 208 deletes in 5 min; 354 queue drops (flood ≫ SF10 capacity) |
+| 2026-09-27 | + PSRAM heap (072c873) | V4.2 | B flood 1/s 5 min | 191 KB | ≤ 5 ms / 58.9 s | 1.2 % / 209 ms | 1 | WiFi healthy; PSRAM 2.06→1.69 MB free; **task-watchdog reboot at +282 s** (LoRa flush > 60 s); 40 queue drops |
+| 2026-09-27 | + event-driven LoRa TX (0bb88d4) | V4.2 | B flood 1/s 5 min | 191 KB | ≤ 1 ms / 17.4 s | 0 % / 186 ms | 0 | LoRa TX blocks loop 10–16 ms/min (was up to 85 s); no reboot; stalls now the once-a-minute cache cleanup: 69–90 deletes + ~8 s unattributed each; 300 cache writes, 208 deletes in 5 min; 354 queue drops (flood ≫ SF10 capacity) |
+| 2026-09-27 | + RAM announce cache | V4.2 | B flood 1/s 5 min | 194 KB | ≤ 1 ms / 2.1 s | 0 % / 190 ms | 0 | 5 stalls (was 166); flash 0.6–1.5 s/min (was 17–20 s); path requests answered from the RAM cache in 0.48 s (`tests/bench_path_response.py`) |

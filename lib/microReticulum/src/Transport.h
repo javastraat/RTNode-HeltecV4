@@ -486,6 +486,21 @@ namespace RNS {
 		static std::map<Bytes, AnnounceEntry> _announce_table;           // A table for storing announces currently waiting to be retransmitted
 		// Multi-path path table: dest_hash → deque of PathEntry (newest-first, max N=3)
 		static std::map<Bytes, std::deque<PathEntry>> _destination_table;
+		// Announces behind current paths, kept in RAM (PSRAM on the V4) so a
+		// path request can be answered without a flash write per announce.
+		// write_path_table() puts the ones behind persisted paths on flash, and
+		// get_cached_packet() falls back to flash for paths restored at boot.
+		// Flat vector: bounded by the path table, linear search is fine.
+		struct CachedAnnounce {
+			Bytes packet_hash;
+			Bytes raw;
+			double sent_at = 0;
+			bool on_flash = false;
+		};
+		static std::vector<CachedAnnounce> _announce_cache;
+		static bool path_references_packet(const Bytes& packet_hash);
+		static void prune_announce_cache();
+		static void persist_cached_announce(const Bytes& packet_hash);
 		// Global anti-replay blob vector (capped at MAX_GLOBAL_BLOBS, linear search OK at N=8)
 		static std::vector<Bytes> _global_blobs;
 		static std::vector<std::pair<Bytes, ReverseEntry>> _reverse_table;           // Flat vector for proof/reply routing (no tree nodes)

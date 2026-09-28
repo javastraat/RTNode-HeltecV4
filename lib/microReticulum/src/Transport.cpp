@@ -95,6 +95,7 @@ static void flatset_insert(std::vector<Bytes>& vec, const Bytes& key) {
 
 /*static*/ std::map<Bytes, Transport::AnnounceEntry> Transport::_announce_table;
 /*static*/ std::map<Bytes, std::deque<Transport::PathEntry>> Transport::_destination_table;
+/*static*/ std::vector<Transport::CachedAnnounce> Transport::_announce_cache;
 /*static*/ std::vector<std::pair<Bytes, Transport::ReverseEntry>> Transport::_reverse_table;
 /*static*/ std::map<Bytes, Transport::LinkEntry> Transport::_link_table;
 /*static*/ std::map<Bytes, Transport::AnnounceEntry> Transport::_held_announces;
@@ -3126,23 +3127,81 @@ Deregisters an announce handler.
 	TRACE("Checking to see if packet " + packet.get_hash().toHex() + " should be cached");
 #if defined(RNS_USE_FS) && defined(RNS_PERSIST_PATHS)
 	if (should_cache_packet(packet) || force_cache) {
-		TRACE("Saving packet " + packet.get_hash().toHex() + " to storage");
-		try {
-			char packet_cache_path[Type::Reticulum::FILEPATH_MAXSIZE];
-			snprintf(packet_cache_path, Type::Reticulum::FILEPATH_MAXSIZE, "%s/%s", Reticulum::_cachepath, packet.get_hash().toHex().c_str());
-			return (Persistence::serialize(packet, packet_cache_path) > 0);
+		// Held in RAM rather than written to flash per announce: every flash
+		// write stalls both cores, and an announce flood meant one write per
+		// announce plus a bulk delete every minute (13-17 s stalls on the
+		// bench). write_path_table() writes the few behind persisted paths.
+		const Bytes& packet_hash = packet.get_hash();
+		for (const auto& cached : _announce_cache) {
+			if (cached.packet_hash == packet_hash) { return true; }
 		}
-		catch (std::exception& e) {
-			ERROR("Error writing packet to cache. The contained exception was: " + std::string(e.what()));
+		// Prune before adding: the caller inserts this announce's path entry
+		// only after caching it, so it is not referenced yet.
+		if (_announce_cache.size() >= (size_t)_path_table_maxsize * MAX_PATHS_PER_DEST + 16) {
+			prune_announce_cache();
 		}
+		CachedAnnounce cached;
+		cached.packet_hash = packet_hash;
+		cached.raw = packet.raw();
+		cached.sent_at = packet.sent_at();
+		_announce_cache.push_back(cached);
+		return true;
 	}
 #endif
 	return false;
 }
 
+/*static*/ bool Transport::path_references_packet(const Bytes& packet_hash) {
+	for (const auto& [destination_hash, deque] : _destination_table) {
+		for (const auto& entry : deque) {
+			if (entry.packet_hash == packet_hash) { return true; }
+		}
+	}
+	return false;
+}
+
+/*static*/ void Transport::prune_announce_cache() {
+	_announce_cache.erase(std::remove_if(_announce_cache.begin(), _announce_cache.end(),
+		[](const CachedAnnounce& cached) { return !path_references_packet(cached.packet_hash); }),
+		_announce_cache.end());
+}
+
+// Writes a RAM-cached announce to flash once, for a path being persisted.
+// One not in RAM was restored from flash at boot, so it is already there.
+/*static*/ void Transport::persist_cached_announce(const Bytes& packet_hash) {
+#if defined(RNS_USE_FS) && defined(RNS_PERSIST_PATHS)
+	for (auto& cached : _announce_cache) {
+		if (cached.packet_hash != packet_hash) { continue; }
+		if (cached.on_flash) { return; }
+		try {
+			Packet packet(Destination(Type::NONE), cached.raw);
+			packet.sent_at(cached.sent_at);
+			packet.unpack();
+			char packet_cache_path[Type::Reticulum::FILEPATH_MAXSIZE];
+			snprintf(packet_cache_path, Type::Reticulum::FILEPATH_MAXSIZE, "%s/%s", Reticulum::_cachepath, packet_hash.toHex().c_str());
+			cached.on_flash = (Persistence::serialize(packet, packet_cache_path) > 0);
+		}
+		catch (std::exception& e) {
+			ERROR("Exception occurred while persisting cached packet.");
+			ERRORF("The contained exception was: %s", e.what());
+		}
+		return;
+	}
+#endif
+}
+
 /*static*/ Packet Transport::get_cached_packet(const Bytes& packet_hash) {
 	TRACE("Loading packet " + packet_hash.toHex() + " from cache storage");
 #if defined(RNS_USE_FS) && defined(RNS_PERSIST_PATHS)
+	for (const auto& cached : _announce_cache) {
+		if (cached.packet_hash == packet_hash) {
+			Packet packet(Destination(Type::NONE), cached.raw);
+			packet.sent_at(cached.sent_at);
+			packet.cached(true);
+			packet.unpack();
+			return packet;
+		}
+	}
 	try {
 
 		char packet_cache_path[Type::Reticulum::FILEPATH_MAXSIZE];
@@ -3164,6 +3223,9 @@ Deregisters an announce handler.
 /*static*/ bool Transport::clear_cached_packet(const Bytes& packet_hash) {
 	TRACE("Clearing packet " + packet_hash.toHex() + " from cache storage");
 #if defined(RNS_USE_FS) && defined(RNS_PERSIST_PATHS)
+	_announce_cache.erase(std::remove_if(_announce_cache.begin(), _announce_cache.end(),
+		[&packet_hash](const CachedAnnounce& cached) { return cached.packet_hash == packet_hash; }),
+		_announce_cache.end());
 	try {
 		char packet_cache_path[Type::Reticulum::FILEPATH_MAXSIZE];
 		snprintf(packet_cache_path, Type::Reticulum::FILEPATH_MAXSIZE, "%s/%s", Reticulum::_cachepath, packet_hash.toHex().c_str());
@@ -3891,6 +3953,14 @@ TRACEF("Transport::start: buffer size %d bytes", Persistence::_buffer.size());
 			}
 			DEBUGF("Trimmed path table from %d to %d destinations for persistence", _destination_table.size(), persist_table.size());
 		}
+
+		// read_path_table() restores a persisted path only if its announce is
+		// on flash, so write those before the table that refers to them.
+		for (const auto& [destination_hash, deque] : persist_table) {
+			for (const auto& entry : deque) {
+				persist_cached_announce(entry.packet_hash);
+			}
+		}
 #if CUSTOM
 		{
 			Persistence::_document.set(persist_table);
@@ -4009,6 +4079,7 @@ TRACE("Transport::write_path_table: buffer size " + std::to_string(Persistence::
 /*static*/ void Transport::clean_caches() {
 	TRACE("Transport::clean_caches()");
 #if defined(RNS_USE_FS) && defined(RNS_PERSIST_PATHS)
+	prune_announce_cache();
 	// CBA Remove cached packets no longer in path list
 	std::list<std::string> files = OS::list_directory(Reticulum::_cachepath);
     for (auto& file : files) {
