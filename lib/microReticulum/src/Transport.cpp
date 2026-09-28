@@ -992,7 +992,7 @@ static inline bool is_resource_ctx(uint8_t ctx) {
 		OS::sleep(0.0005);
 	}
 
-	_jobs_locked = true;
+	JobsLock jobs_lock;
 
 	bool sent = false;
 	double outbound_time = OS::time();
@@ -1374,7 +1374,6 @@ static inline bool is_resource_ctx(uint8_t ctx) {
 		cache_packet(packet);
 	}
 
-	_jobs_locked = false;
 	return sent;
 }
 
@@ -1563,7 +1562,7 @@ static inline bool is_resource_ctx(uint8_t ctx) {
 		return;
 	}
 
-	_jobs_locked = true;
+	JobsLock jobs_lock;
 
 	Packet packet(RNS::Destination(RNS::Type::NONE), raw);
 	if (!packet.unpack()) {
@@ -2949,8 +2948,6 @@ static inline bool is_resource_ctx(uint8_t ctx) {
 	// 			_link_table.size(), _reverse_table.size());
 	// 	}
 	// }
-
-	_jobs_locked = false;
 }
 
 /*static*/ void Transport::synthesize_tunnel(const Interface& interface) {

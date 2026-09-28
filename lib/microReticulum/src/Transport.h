@@ -536,6 +536,14 @@ namespace RNS {
 
 		static double _start_time;
 		static bool _jobs_locked;
+		// Holds _jobs_locked for one inbound()/outbound() call and clears it on
+		// every way out. Python clears jobs_locked before each return; the
+		// returns here that did not left jobs() — announce rebroadcasts, table
+		// culls — stopped until some other packet went all the way through.
+		struct JobsLock {
+			JobsLock() { _jobs_locked = true; }
+			~JobsLock() { _jobs_locked = false; }
+		};
 		static bool _jobs_running;
 		static float _job_interval;
 		static double _jobs_last_run;
