@@ -36,8 +36,9 @@
 
 #include "FirewallMode.h"
 
+#include <SHA256.h>
+
 #if defined(ESP32)
-    #include <esp_task_wdt.h>
     #include <Preferences.h>
 #endif
 // Externally-defined LoRa parameters (see Config.h / RNode_Firmware.ino)
@@ -77,9 +78,15 @@ extern char     rtc_node_hash_hex[33];
 
 // Defaults — must match Reticulum's interface-announcer defaults so the
 // stamp validates against the on-network handler (RNS/Discovery.py).
-#define ADV_DEFAULT_STAMP_COST      14  // Must be >= 14 — both Python & Rust rnsd require this minimum
+// RNS 1.5.2's InterfaceAnnouncer.DEFAULT_STAMP_VALUE, and the value a 1.5.2
+// node requires by default (required_discovery_value). 1.1.3 used 14; a
+// 1.5.2 node ignores a value-14 stamp three times in four.
+#define ADV_DEFAULT_STAMP_COST      16
 #define ADV_WORKBLOCK_EXPAND_ROUNDS 20
 #define ADV_STAMP_SIZE              32 /* SHA-256 / HASHLENGTH/8 */
+// The stamp search runs a slice per loop() pass so it never holds up TCP or
+// LoRa; in one piece it took 13–28 s at value 14 (bench, 2026-09-28).
+#define ADV_STAMP_SLICE_US          2000
 
 // Default announce interval matches RNS Reticulum.py's discoverable-interface
 // fallback when announce_interval is not specified (6 hours). LoRa airtime
@@ -109,13 +116,17 @@ static RNS::Bytes advertise_cached_stamp;
 static const char* ADV_NVS_NS   = "rtnode";
 static const char* ADV_NVS_IH   = "adv_ih";   // infohash (32 bytes)
 static const char* ADV_NVS_STAMP = "adv_st";   // stamp (32 bytes)
+static const char* ADV_NVS_COST  = "adv_sc";   // stamp value it was made for (absent before value 16)
 
 static void advertise_load_stamp() {
     Preferences prefs;
     if (!prefs.begin(ADV_NVS_NS, true)) return; // read-only
     size_t ih_len = prefs.getBytesLength(ADV_NVS_IH);
     size_t st_len = prefs.getBytesLength(ADV_NVS_STAMP);
-    if (ih_len == 32 && st_len == ADV_STAMP_SIZE) { // HASHLENGTH/8 = 32
+    // A stamp cached for a lower value would be ignored by the nodes that
+    // require the current one.
+    uint8_t cost = prefs.getUChar(ADV_NVS_COST, 0);
+    if (ih_len == 32 && st_len == ADV_STAMP_SIZE && cost >= ADV_DEFAULT_STAMP_COST) { // HASHLENGTH/8 = 32
         uint8_t ih_buf[64], st_buf[32];
         prefs.getBytes(ADV_NVS_IH, ih_buf, ih_len);
         prefs.getBytes(ADV_NVS_STAMP, st_buf, st_len);
@@ -131,6 +142,7 @@ static void advertise_save_stamp() {
     if (!prefs.begin(ADV_NVS_NS, false)) return;
     prefs.putBytes(ADV_NVS_IH, advertise_cached_infohash.data(), advertise_cached_infohash.size());
     prefs.putBytes(ADV_NVS_STAMP, advertise_cached_stamp.data(), advertise_cached_stamp.size());
+    prefs.putUChar(ADV_NVS_COST, ADV_DEFAULT_STAMP_COST);
     prefs.end();
     RNS::verbose("[Advertise] Saved stamp to NVS");
 }
@@ -282,80 +294,63 @@ static void advertise_apply_jitter(double& lat, double& lon, const RNS::Bytes& s
     if (lon < -180.0) lon += 360.0;
 }
 
-// ─── LXMF stamp (proof-of-work) ──────────────────────────────────────────────
-// Generates an HKDF-SHA256 workblock and finds a 32-byte stamp such that
-// SHA-256(workblock || stamp) interpreted as a big-endian integer is no
-// greater than (1 << (256 - cost)). Matches LXMF/LXStamper.py.
+// ─── LXMF stamp (proof-of-work), a slice at a time ──────────────────────────
+// A stamp is 32 bytes such that SHA-256(workblock || stamp) has at least
+// ADV_DEFAULT_STAMP_COST leading zero bits (LXMF/LXStamper.py). The workblock
+// is ADV_WORKBLOCK_EXPAND_ROUNDS rounds of HKDF-SHA256 over the infohash. Each
+// round is hashed in as it is made, one round per loop() pass, and never
+// stored; the search then starts every candidate from the SHA-256 state after
+// the workblock, so a candidate costs one 64-byte block, not 5 KB.
 
-static RNS::Bytes advertise_stamp_workblock(const RNS::Bytes& material) {
-    RNS::Bytes workblock;
-    for (int n = 0; n < ADV_WORKBLOCK_EXPAND_ROUNDS; ++n) {
-        // salt = full_hash(material || msgpack(n))
-        RNS::Bytes salt_input;
-        salt_input.append(material);
-        adv_mp_uint(salt_input, (uint64_t)n);
-        RNS::Bytes salt = RNS::Identity::full_hash(salt_input);
+enum AdvertisePhase : uint8_t { ADV_PHASE_IDLE, ADV_PHASE_WORKBLOCK, ADV_PHASE_SEARCH };
 
-        RNS::Bytes round = RNS::Cryptography::hkdf(256, material, salt);
-        workblock.append(round);
+static struct {
+    AdvertisePhase phase = ADV_PHASE_IDLE;
+    RNS::Bytes packed;          // the info being stamped; sent with the stamp
+    RNS::Bytes infohash;
+    uint8_t    round = 0;       // workblock rounds hashed in so far
+    SHA256     workblock;       // SHA-256 state over the workblock so far
+    uint8_t    candidate[ADV_STAMP_SIZE];
+    uint32_t   attempts = 0;
+    uint32_t   started_ms = 0;
+} adv_stamp;
 
-#if defined(ESP32)
-        esp_task_wdt_reset();
-#endif
+static uint32_t adv_leading_zero_bits(const uint8_t* h, uint32_t enough) {
+    uint32_t lz = 0;
+    for (size_t i = 0; i < 32 && lz < enough; ++i) {
+        if (h[i] == 0) { lz += 8; continue; }
+        lz += __builtin_clz((uint32_t)h[i]) - 24;
+        break;
     }
-    return workblock;
+    return lz;
 }
 
-// Returns true and writes a valid stamp into "stamp_out" on success.
-static bool advertise_generate_stamp(const RNS::Bytes& workblock,
-                                     uint8_t cost,
-                                     RNS::Bytes& stamp_out) {
-    if (cost == 0 || cost > 32) return false;
+// Workblock round n: HKDF-SHA256(length 256, material = infohash,
+// salt = full_hash(infohash || msgpack(n))), hashed into adv_stamp.workblock.
+static void adv_hash_workblock_round(uint8_t n) {
+    RNS::Bytes salt_input;
+    salt_input.append(adv_stamp.infohash);
+    adv_mp_uint(salt_input, (uint64_t)n);
+    RNS::Bytes salt = RNS::Identity::full_hash(salt_input);
+    RNS::Bytes round = RNS::Cryptography::hkdf(256, adv_stamp.infohash, salt);
+    adv_stamp.workblock.update(round.data(), round.size());
+}
 
-    // target = 1 << (256 - cost). We compare the leading bytes of the SHA-256
-    // result against this threshold by counting leading zero bits.
-    const uint32_t leading_zero_bits_required = cost;
-
-    uint32_t round = 0;
-    while (true) {
-        RNS::Bytes candidate = RNS::Cryptography::random(ADV_STAMP_SIZE);
-
-        RNS::Bytes hash_input;
-        hash_input.append(workblock);
-        hash_input.append(candidate);
-        RNS::Bytes h = RNS::Identity::full_hash(hash_input);
-
-        // Count leading zero bits.
-        uint32_t lz = 0;
-        const uint8_t* hp = h.data();
-        size_t hsize = h.size();
-        for (size_t i = 0; i < hsize && lz < leading_zero_bits_required; ++i) {
-            uint8_t byte = hp[i];
-            if (byte == 0) {
-                lz += 8;
-                continue;
-            }
-            for (int bit = 7; bit >= 0; --bit) {
-                if ((byte >> bit) & 1) goto stamp_count_done;
-                lz++;
-            }
-        }
-        stamp_count_done:
-        if (lz >= leading_zero_bits_required) {
-            stamp_out = candidate;
-            return true;
-        }
-
-        if ((++round & 0x3FF) == 0) { // every 1024 attempts
-#if defined(ESP32)
-            esp_task_wdt_reset();
-#endif
-            // Hard cap to avoid pathological infinite loops on misconfiguration.
-            if (round > (1UL << (cost + 6))) {
-                return false;
-            }
-        }
-    }
+// Tries candidates for up to ADV_STAMP_SLICE_US. True once one qualifies;
+// it is left in adv_stamp.candidate.
+static bool adv_search_slice() {
+    uint32_t start = micros();
+    uint8_t h[32];
+    do {
+        // Count up through the first 8 bytes of a random starting candidate.
+        for (int i = 0; i < 8 && ++adv_stamp.candidate[i] == 0; ++i) {}
+        SHA256 attempt = adv_stamp.workblock;
+        attempt.update(adv_stamp.candidate, ADV_STAMP_SIZE);
+        attempt.finalize(h, sizeof(h));
+        adv_stamp.attempts++;
+        if (adv_leading_zero_bits(h, ADV_DEFAULT_STAMP_COST) >= ADV_DEFAULT_STAMP_COST) return true;
+    } while ((uint32_t)(micros() - start) < ADV_STAMP_SLICE_US);
+    return false;
 }
 
 // ─── Build the discovery info map ────────────────────────────────────────────
@@ -453,38 +448,8 @@ static RNS::Bytes advertise_build_info() {
     return packed;
 }
 
-// ─── Send a single discovery announce ───────────────────────────────────────
-static void advertise_send_announce() {
-    if (!advertise_destination) return;
-
-    RNS::verbose("[Advertise] Building discovery announce");
-    RNS::Bytes packed = advertise_build_info();
-    RNS::Bytes infohash = RNS::Identity::full_hash(packed);
-
-    RNS::Bytes stamp;
-    bool need_pow = true;
-    if (advertise_cached_infohash.size() > 0 &&
-        advertise_cached_infohash == infohash &&
-        advertise_cached_stamp.size() == ADV_STAMP_SIZE) {
-        stamp = advertise_cached_stamp;
-        need_pow = false;
-        RNS::verbose("[Advertise] Reusing cached stamp (info unchanged)");
-    }
-
-    if (need_pow) {
-        RNS::verbose("[Advertise] Generating workblock + stamp (cost=14, this may take a few seconds)");
-        RNS::Bytes workblock = advertise_stamp_workblock(infohash);
-        if (!advertise_generate_stamp(workblock, ADV_DEFAULT_STAMP_COST, stamp)) {
-            RNS::error("[Advertise] Stamp generation failed; skipping announce");
-            return;
-        }
-        advertise_cached_infohash = infohash;
-        advertise_cached_stamp    = stamp;
-#if defined(ESP32)
-        advertise_save_stamp();
-#endif
-    }
-
+// ─── Send a discovery announce ──────────────────────────────────────────────
+static void advertise_send(const RNS::Bytes& packed, const RNS::Bytes& stamp) {
     // Assemble payload: bytes([flags]) || packed || stamp
     RNS::Bytes app_data;
     app_data.append((uint8_t)0x00); // flags: not signed, not encrypted
@@ -494,6 +459,9 @@ static void advertise_send_announce() {
     RNS::verbose("[Advertise] Sending interface discovery announce, payload size: " +
                  std::to_string((int)app_data.size()) + " bytes");
     advertise_destination.announce(app_data);
+
+    advertise_first_announce = false;
+    advertise_next_run_ms    = millis() + advertise_announce_interval_ms;
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
@@ -533,10 +501,46 @@ inline void advertise_init() {
     }
 }
 
-// Periodic loop hook — call from the main loop().
+// Periodic loop hook — call from the main loop(). Each call does one small
+// step: when an announce is due, builds the info and either reuses the cached
+// stamp or starts a new one; while a stamp is being made, hashes one workblock
+// round or searches for ADV_STAMP_SLICE_US.
 inline void advertise_loop() {
     if (!advertise_initialised) return;
     if (!firewall_state.advert_enabled) return;
+
+    if (adv_stamp.phase == ADV_PHASE_WORKBLOCK) {
+        adv_hash_workblock_round(adv_stamp.round++);
+        if (adv_stamp.round == ADV_WORKBLOCK_EXPAND_ROUNDS) {
+            RNS::Bytes start = RNS::Cryptography::random(ADV_STAMP_SIZE);
+            memcpy(adv_stamp.candidate, start.data(), ADV_STAMP_SIZE);
+            adv_stamp.attempts = 0;
+            adv_stamp.phase = ADV_PHASE_SEARCH;
+        }
+        return;
+    }
+
+    if (adv_stamp.phase == ADV_PHASE_SEARCH) {
+        if (!adv_search_slice()) {
+            // Bounded, as before: 64 times the expected number of attempts.
+            if (adv_stamp.attempts > (1UL << (ADV_DEFAULT_STAMP_COST + 6))) {
+                RNS::error("[Advertise] Stamp generation failed; skipping announce");
+                adv_stamp.phase = ADV_PHASE_IDLE;
+                advertise_next_run_ms = millis() + advertise_announce_interval_ms;
+            }
+            return;
+        }
+        RNS::verbose("[Advertise] Stamp found after " + std::to_string(adv_stamp.attempts) +
+                     " attempts in " + std::to_string(millis() - adv_stamp.started_ms) + " ms");
+        advertise_cached_infohash = adv_stamp.infohash;
+        advertise_cached_stamp    = RNS::Bytes(adv_stamp.candidate, ADV_STAMP_SIZE);
+#if defined(ESP32)
+        advertise_save_stamp();
+#endif
+        adv_stamp.phase = ADV_PHASE_IDLE;
+        advertise_send(adv_stamp.packed, advertise_cached_stamp);
+        return;
+    }
 
     uint32_t now = millis();
     // Handle uint32 wrap-around: only treat as "due" when the unsigned
@@ -546,10 +550,25 @@ inline void advertise_loop() {
     int32_t delta = (int32_t)(now - advertise_next_run_ms);
     if (delta < 0) return;
 
-    advertise_send_announce();
+    RNS::verbose("[Advertise] Building discovery announce");
+    RNS::Bytes packed = advertise_build_info();
+    RNS::Bytes infohash = RNS::Identity::full_hash(packed);
+    if (advertise_cached_infohash.size() > 0 &&
+        advertise_cached_infohash == infohash &&
+        advertise_cached_stamp.size() == ADV_STAMP_SIZE) {
+        RNS::verbose("[Advertise] Reusing cached stamp (info unchanged)");
+        advertise_send(packed, advertise_cached_stamp);
+        return;
+    }
 
-    advertise_first_announce = false;
-    advertise_next_run_ms    = now + advertise_announce_interval_ms;
+    RNS::verbose("[Advertise] Generating workblock + stamp (value " + std::to_string(ADV_DEFAULT_STAMP_COST) +
+                 "), a slice per loop pass");
+    adv_stamp.packed     = packed;
+    adv_stamp.infohash   = infohash;
+    adv_stamp.round      = 0;
+    adv_stamp.workblock.reset();
+    adv_stamp.started_ms = now;
+    adv_stamp.phase      = ADV_PHASE_WORKBLOCK;
 }
 
 #endif // FIREWALL_MODE
