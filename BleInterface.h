@@ -44,6 +44,7 @@
 
 #include <Arduino.h>
 #include <esp_heap_caps.h>
+#include <esp_mac.h>
 #include <vector>
 #include <Interface.h>
 #include <Transport.h>
@@ -212,6 +213,7 @@ static NimBLECharacteristic* tx_char = nullptr;
 static NimBLECharacteristic* control_char = nullptr;
 static NimBLECharacteristic* data_char = nullptr;
 static uint8_t               our_identity[IDENTITY_LEN];
+static uint8_t               our_address[6];   // static random, most significant byte first
 static uint32_t              orphan_writes = 0, self_connections = 0, replaced = 0;
 static uint32_t              last_report_ms = 0;
 static bool                  started = false;
@@ -308,6 +310,25 @@ inline void start() {
     memcpy(our_identity, identity_hash.data(), IDENTITY_LEN);
 
     NimBLEDevice::init("");
+    // Our own address: static random, fixed per chip (a hash of its MAC), as
+    // Prns does. The public address is the one this board had under stock
+    // RNode firmware, and a phone once paired with that keeps using its
+    // cached RNode service table ("Reticulum service not found"). A static
+    // random address has its top two bits set, so it also sorts high, and
+    // v2.2 peers that decide by address comparison dial us.
+    {
+        uint8_t mac[6];
+        esp_read_mac(mac, ESP_MAC_BT);
+        RNS::Bytes seed(mac, sizeof(mac));
+        seed.append((const uint8_t*)"rtnode-ble", 10);
+        RNS::Bytes digest = RNS::Identity::full_hash(seed);
+        memcpy(our_address, digest.data(), sizeof(our_address));
+        our_address[0] |= 0xC0;
+        uint8_t little_endian[6];
+        for (int i = 0; i < 6; i++) little_endian[i] = our_address[5 - i];
+        ble_hs_id_set_rnd(little_endian);
+        NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
+    }
     NimBLEDevice::setMTU(517);
     NimBLEDevice::setCustomGapHandler(on_gap_event);
 
@@ -339,10 +360,12 @@ inline void start() {
 
     started = true;
     last_report_ms = millis();
-    Serial.printf("[BLE] up: %d slots, identity %s, address %s; internal %u -> %u (%+d), "
+    char address_text[18];
+    snprintf(address_text, sizeof(address_text), "%02x:%02x:%02x:%02x:%02x:%02x", our_address[0], our_address[1],
+             our_address[2], our_address[3], our_address[4], our_address[5]);
+    Serial.printf("[BLE] up: %d slots, identity %s, address %s (random); internal %u -> %u (%+d), "
                   "psram %u -> %u (%+d)\r\n",
-                  SLOTS, short_identity(our_identity).c_str(),
-                  NimBLEDevice::getAddress().toString().c_str(),
+                  SLOTS, short_identity(our_identity).c_str(), address_text,
                   (unsigned)internal_before, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                   (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL) - (int)internal_before,
                   (unsigned)psram_before, (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
