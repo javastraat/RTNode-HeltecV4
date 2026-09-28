@@ -17,7 +17,7 @@ SHA-256.
 
 Commands: announce; path {dest, timeout}; link {dest, aspects, timeout};
 echo {dest, n, size, timeout}; resource {dest, size, timeout}; send {dest,
-aspects, n} (single packets, no link); flood {rate, duration} (announces for
+aspects, n, size, gap, wait} (single packets, no link, proofs counted); flood {rate, duration} (announces for
 fresh destinations); close {dest}; quit.
 Events: ready, heard (every announce heard), path, link, link_in, echo,
 resource, resource_in, packet_in, flood, error.
@@ -206,6 +206,8 @@ def main():
                 return
             proved = []
             for n in range(command.get("n", 1)):
+                if n:
+                    time.sleep(command.get("gap", 0))
                 receipt = RNS.Packet(out, os.urandom(command.get("size", 64))).send()
                 if receipt:
                     receipt.set_delivery_callback(lambda r: proved.append(r))

@@ -29,6 +29,9 @@ with RTNODE_BENCH_WAN_HOST connects backbone 1 to:
                         request for it is answered
   lan-link-wan, wan-link-lan
                         links both ways carry echoes and an intact resource
+  lan-packet-wan, wan-packet-lan
+                        single packets both ways arrive and their proofs
+                        come back
   wan-announce-known    a WAN announce for a destination the LAN asked about
                         crosses
   wan-link-survives-churn, wan-reaches-quiet-lan
@@ -177,6 +180,12 @@ def lan(args):
             for b in agents:
                 if b is not a:
                     link_check(record, "link", a, b, args)
+
+        print("single packets and their proofs:", flush=True)
+        for a in agents:
+            for b in agents:
+                if b is not a:
+                    packet_check(record, "packet", a, b, args)
     finally:
         for agent in agents:
             agent.quit()
@@ -212,6 +221,24 @@ def link_check(record, check, a, b, args):
            echo_p50_ms=echo.get("rtt_p50_ms") if echo else None,
            resource=f"{size}B in {resource['s']}s" if resource else None, intact=intact)
     a.call("closed", 10, cmd="close", dest=b.dest)
+    if lora:
+        time.sleep(args.lora_settle)
+
+
+def packet_check(record, check, a, b, args):
+    """a sends b single packets (no link); b proves each, and the proofs come
+    back through the node's reverse table."""
+    lora = slow(a, b)
+    since = b.mark()
+    # One at a time on LoRa, as an app sends messages: back to back, the
+    # next packet goes on air while the first one's proof is coming back.
+    sent = a.call("send", 180, cmd="send", dest=b.dest, aspects=f"contract.{b.name}", n=3,
+                  size=100 if lora else 300, gap=10 if lora else 0.2, wait=30 if lora else 5)
+    arrived = sum(1 for e in b.events[since:] if e["event"] == "packet_in" and e["dest"] == b.dest)
+    record(check, a, b, sent and sent.get("proved") == sent.get("n") and arrived == sent.get("n"),
+           arrived=f"{arrived}/{sent.get('n') if sent else '?'}",
+           proved=f"{sent.get('proved') if sent else '?'}/{sent.get('n') if sent else '?'}",
+           reason=sent.get("reason") if sent and sent.get("reason") else None)
     if lora:
         time.sleep(args.lora_settle)
 
@@ -328,9 +355,11 @@ def wan(args):
             record("lan-path-lan", a, b, path and path["ok"], s=path.get("s") if path else None)
             mentioned_at = time.time()
 
-        print("links across the boundary:", flush=True)
+        print("links and packets across the boundary:", flush=True)
         link_check(record, "lan-link-wan", a, w, args)
         link_check(record, "wan-link-lan", w, a, args)
+        packet_check(record, "lan-packet-wan", a, w, args)
+        packet_check(record, "wan-packet-lan", w, a, args)
 
         if mentioned_at:
             time.sleep(max(0, mentioned_at + 47 - time.time()))
@@ -446,10 +475,12 @@ def soak(args):
     flows = []
     if tcp and prnsd:
         flows.append(("wifi<->bt", tcp, prnsd, 1, 400, 60, args.resource, 0.01))
+    # LoRa at SF10 carries an echo round (request, proof, reply) in about 5 s
+    # of airtime; these two keep the channel about a quarter busy.
     if tcp and lora:
-        flows.append(("wifi<->lora", tcp, lora, 20, 100, 0, 0, 0.10))
+        flows.append(("wifi<->lora", tcp, lora, 30, 100, 0, 0, 0.10))
     if prnsd and lora:
-        flows.append(("bt<->lora", prnsd, lora, 30, 100, 0, 0, 0.10))
+        flows.append(("bt<->lora", prnsd, lora, 60, 100, 0, 0, 0.10))
     if w and tcp:
         flows.append(("wan<->wifi", w, tcp, 2, 400, 120, args.resource, 0.01))
     try:
