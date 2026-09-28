@@ -258,8 +258,17 @@ prints the reason with `printf`, which does not reach the log. The pool has
 probably never worked on any board. Two findings for the fix: `operator
 delete` must route frees by address (blocks from before the pool must go to
 `free()`), and TLSF has no locking while `new` runs on several tasks.
-Diagnostic work is on the local branch `wip/tlsf-pool-debug` (do not flash);
-next is a standalone PSRAM + TLSF probe firmware, outside RTNode.
+**Root cause:** ESP-IDF's own heap is built on TLSF and exports the same
+`tlsf_*` symbols with a different API (IDF 4.3+: `tlsf_size(tlsf_t)`, a
+three-argument `tlsf_create_with_pool`). The firmware links IDF's functions
+(`addr2line` → `heap_tlsf.c`), so microReticulum's pool code has been calling
+them with the wrong arguments; a standalone probe calling `tlsf_size()`
+crashed inside `heap_tlsf.c:693`. **Fix (072c873):** on ESP32, `operator new`
+asks ESP-IDF's heap for PSRAM (`heap_caps_malloc(MALLOC_CAP_SPIRAM)`) once
+`OS::init_heap()` has seen PSRAM, and `delete` is `free()`; IDF's heap is
+already TLSF-based and thread-safe. The private pool stays for nRF52.
+Result under the #43 flood: minimum internal heap 191 KB (was 3.5 KB), ping
+loss 4 % (was 73 %), no WiFi wedge.
 
 ## Issue #44: octal PSRAM
 
@@ -371,3 +380,4 @@ Each step's results go in the log below before the next step starts.
 |---|---|---|---|---|---|---|---|---|
 | 2026-09-27 | v1.0.50 + inst (60b1aad) | V4.2 | A idle 10 min | 198 KB | ≤ 1 ms / 212 ms | 0 % / 182 ms | 0 | modem-sleep RTT; display ~6 pushes/s |
 | 2026-09-27 | v1.0.50 + inst (60b1aad) | V4.2 | B flood 1/s 5 min | 3.5 KB | ≤ 5 ms / 58.5 s | 73 % / — | 1 | WiFi wedged from +82 s until reboot; 20 LoRa queue drops |
+| 2026-09-27 | + PSRAM heap (072c873) | V4.2 | B flood 1/s 5 min | 191 KB | ≤ 5 ms / 58.9 s | 4.1 % / 209 ms | 1 | WiFi healthy; PSRAM 2.06→1.69 MB free; **task-watchdog reboot at +282 s** (LoRa flush > 60 s); 40 queue drops |
