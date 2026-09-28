@@ -2052,16 +2052,14 @@ static uint32_t ingress_dropped = 0;
 				if (is_local_destination) {
 					NOTICE("SKIP-FWD - TO: " + short_hash(packet.destination_hash()) + " is local dest");
 				}
-				// Forward link proofs (delivery confirmations on established links)
-				if (!is_local_destination && packet.packet_type() == Type::Packet::PROOF) {
-					auto link_it = _link_table.find(packet.destination_hash());
-					if (link_it != _link_table.end()) {
-						LinkEntry& le = (*link_it).second;
-						Interface out_iface = find_interface_from_hash(le._outbound_interface.get_hash());
-						NOTICE("[PROOF] - FROM: " + packet.receiving_interface().toString() + " (" + zone_tag(is_backbone_interface(packet.receiving_interface())) + ") - TO: " + short_hash(packet.destination_hash()) + " (" + dest_zone(packet.destination_hash()) + ") - FWD: " + (out_iface ? out_iface.toString() : "?") + " (" + (out_iface ? zone_tag(is_backbone_interface(out_iface)) : "?") + ") LINK-PROOF");
-						if (out_iface) transmit(out_iface, packet.raw());
-					}
-				}
+				// Proofs on established links are left to link transport below,
+				// which sends them on the opposite interface to the one they
+				// came in on (Transport.py). A block here used to send them to
+				// the link's outbound interface as well, whatever their
+				// direction: a delivery proof from the destination went back
+				// out where it came from, and one from the initiator went out
+				// twice. On LoRa that doubled the airtime of every proof and
+				// collided with the far end's next frame.
 				if (!is_local_destination && packet.packet_type() != Type::Packet::ANNOUNCE && packet.packet_type() != Type::Packet::PROOF) {
 					bool is_from_backbone = is_backbone_interface(packet.receiving_interface());
 					if (!is_from_backbone) {
