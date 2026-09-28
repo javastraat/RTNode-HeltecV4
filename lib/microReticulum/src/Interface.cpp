@@ -224,24 +224,25 @@ bool Interface::should_ingress_limit() {
 	return should_limit(*this, _impl->ingress_source(), Utilities::OS::time());
 }
 
-void Interface::hold_announce(const Bytes& destination_hash, const Bytes& raw, uint8_t hops) {
+bool Interface::hold_announce(const Bytes& destination_hash, const Bytes& raw, uint8_t hops, bool may_add) {
 	assert(_impl);
 	IngressState& state = _impl->ingress_source();
 	for (auto& held : state.held) {
 		if (held.destination_hash == destination_hash) {
 			held.raw = raw;
 			held.hops = hops;
-			return;
+			return true;
 		}
 	}
 	// Python holds up to 256; that fits in PSRAM, not in a board's internal RAM.
 	size_t limit = Utilities::OS::heap_in_psram() ? MAX_HELD_ANNOUNCES : MAX_HELD_ANNOUNCES_SMALL;
-	if (state.held.size() >= limit) { return; }
+	if (!may_add || state.held.size() >= limit) { return false; }
 	HeldAnnounce held;
 	held.destination_hash = destination_hash;
 	held.raw = raw;
 	held.hops = hops;
 	state.held.push_back(held);
+	return true;
 }
 
 // Python's process_held_announces(), minus the inbound() call: one held

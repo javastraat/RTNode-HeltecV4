@@ -306,6 +306,11 @@ namespace RNS { namespace Type {
 		static const uint8_t  IA_FREQ_SAMPLES          = 6;
 		static const uint16_t MAX_HELD_ANNOUNCES       = 256;
 		static const uint16_t MAX_HELD_ANNOUNCES_SMALL = 32;    // boards whose heap is internal RAM
+		// Python caps held announces per interface only. A node has up to eight
+		// TCP clients, the backbone slots and LoRa, so the total is capped too:
+		// 512 is about 128 KB of PSRAM.
+		static const uint16_t MAX_HELD_ANNOUNCES_TOTAL       = 512;
+		static const uint16_t MAX_HELD_ANNOUNCES_TOTAL_SMALL = 32;
 		static const uint32_t IC_NEW_TIME              = 2*60*60;
 		static constexpr double IC_BURST_FREQ_NEW      = 3.5;
 		static constexpr double IC_BURST_FREQ          = 12;

@@ -412,6 +412,13 @@ static inline bool is_resource_ctx(uint8_t ctx) {
 	release_held_announces();
 }
 
+// Set while a released announce goes back through inbound(), which then skips
+// ingress control for it: the local TCP server would credit it to whichever
+// client sent data last, and could hold it again under a flooding one.
+static bool releasing_held_announce = false;
+// Announces ingress control could not hold: source or total store full.
+static uint32_t ingress_dropped = 0;
+
 // Ingress control, as Python RNS's interface jobs: every INTERFACE_JOBS_INTERVAL
 // each interface may hand back one held announce, which goes through inbound()
 // again. Runs outside jobs(): outbound() waits while _jobs_running is set.
@@ -432,8 +439,16 @@ static inline bool is_resource_ctx(uint8_t ctx) {
 	for (auto& [raw, interface] : releases) {
 		VERBOSEF("[INGRESS] %s releasing a held announce (%u still held)", interface.toString().c_str(),
 		         (unsigned)interface.held_announce_count());
+		struct Releasing {
+			Releasing() { releasing_held_announce = true; }
+			~Releasing() { releasing_held_announce = false; }
+		} releasing;
 		inbound(raw, interface);
 	}
+}
+
+/*static*/ uint32_t Transport::ingress_dropped_count() {
+	return ingress_dropped;
 }
 
 /*static*/ size_t Transport::ingress_held_count() {
@@ -2363,12 +2378,20 @@ static inline bool is_resource_ctx(uint8_t ctx) {
 			// out; this counts every one, since checking signatures is the work a
 			// flood makes an ESP32 do. raw_in is held as it arrived, IFAC and
 			// all, so a released announce is verified again.
-			if (interface) {
+			if (interface && !releasing_held_announce) {
 				Interface receiving = interface;
 				receiving.received_announce();
 				if (_destination_table.find(packet.destination_hash()) == _destination_table.end()
 				    && receiving.should_ingress_limit()) {
-					receiving.hold_announce(packet.destination_hash(), raw_in, packet.hops());
+					size_t total_limit = OS::heap_in_psram() ? Type::Interface::MAX_HELD_ANNOUNCES_TOTAL
+					                                         : Type::Interface::MAX_HELD_ANNOUNCES_TOTAL_SMALL;
+					bool may_add = ingress_held_count() < total_limit;
+					if (!receiving.hold_announce(packet.destination_hash(), raw_in, packet.hops(), may_add)) {
+						if (ingress_dropped++ == 0) {
+							NOTICEF("[INGRESS] %s: held announces full (%u held in total), dropping; counted as ic_drop",
+							        receiving.toString().c_str(), (unsigned)ingress_held_count());
+						}
+					}
 					return;
 				}
 			}

@@ -236,7 +236,9 @@ namespace RNS {
 		// These act on the ingress state of the packet being delivered.
 		void received_announce();
 		bool should_ingress_limit();
-		void hold_announce(const Bytes& destination_hash, const Bytes& raw, uint8_t hops);
+		// Replaces the announce held for the same destination, or adds one when
+		// may_add and the source is under its own limit. False: dropped.
+		bool hold_announce(const Bytes& destination_hash, const Bytes& raw, uint8_t hops, bool may_add);
 		// At most one held announce per calmed ingress state (Python's
 		// process_held_announces), for Transport to feed back through inbound().
 		void collect_released_announces(std::vector<Bytes>& out);
