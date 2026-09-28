@@ -522,9 +522,10 @@ reference (Prns has not tested its R8 support on hardware either).
    peers, 2M PHY, L2CAP.
 7. **Bluetooth native GATT** → **Columba characteristics** → **L2CAP**, each
    through scenario F. **Columba first** (2026-09-28, the peer on the bench):
-   `BleInterface.h`, env `rtnode_heltec_v4_bench_bleif`. See "Bluetooth
-   interface, first cut" below. Prns-native and L2CAP still to do; the
-   interface is bench-only until a portal setting turns it on at boot.
+   `BleInterface.h`. See "Bluetooth interface, first cut" below. **Prns's
+   native protocol** followed the same day (04aa2a1), tested against prnsd
+   0.3.7. **On by default** in the V4 release build (James), with a portal
+   switch applied at boot (06efcfb). L2CAP still to do.
 
 Each step's results go in the log below before the next step starts.
 
@@ -536,6 +537,10 @@ Each step's results go in the log below before the next step starts.
   well as the Prns-native ones.
 - 2026-09-27 — Bluetooth targets the V4 only: the 2 MB board now, the
   octal-PSRAM board once #44 ships. Not the V3.
+- 2026-09-28 — Bluetooth peers are trusted local interfaces, exactly like
+  LoRa.
+- 2026-09-28 — Bluetooth is on by default in V4 builds; the portal can turn
+  it off (takes effect at the next boot).
 
 ## Results log
 
@@ -566,3 +571,4 @@ Each step's results go in the log below before the next step starts.
 | 2026-09-28 | + WiFi power-save probe | V4.2 | boot | — | — | — | — | power save off with Bluetooth on: ESP-IDF aborts, boot loop |
 | 2026-09-28 | Bluetooth interface (a4be90c…819784b) | V4.2 + Mac relay | `bench_ble_rns.py` | — | — | — | — | PASS: announces both ways ~1 s; Link 0.3 s; 10/10 echoes, RTT p50 149 ms (one fragment), 373 ms (peer fragments at 95 B), 421 ms (both at 100 B) |
 | 2026-09-28 | same | V4.2 + Galaxy S23, Columba 2.2.6 | `bench_ble_columba.py` | 137 KB | ≤ 1 ms / 576 ms | — | 0 | PASS: path 1.24 s (never answered before b0c7a86), LXMF delivered; proof back over Bluetooth 126 ms after the message crossed; two peers at once, no drops or bad fragments |
+| 2026-09-28 | + Prns native (04aa2a1), on by default (06efcfb) | V4.2 + prnsd 0.3.7 on the Mac | `bench_ble_rns.py --via prnsd` | 137 KB | — | — | 0 | PASS: Hello answered (Prns peer, MTU 517); announces both ways 0.84 s / 1.67 s (3 hops); Link 0.27 s; 10/10 echoes, RTT p50 392 ms; Columba on another slot throughout |
