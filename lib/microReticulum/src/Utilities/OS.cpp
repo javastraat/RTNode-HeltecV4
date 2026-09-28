@@ -7,6 +7,16 @@
 #include <esp_heap_caps.h>
 #endif
 
+// ESP-IDF's own heap is built on TLSF and exports the same tlsf_* symbols
+// with a different API (IDF 4.3+: tlsf_size(tlsf_t), a three-argument
+// tlsf_create_with_pool(), ...). On ESP32 the linker resolves this library's
+// TLSF calls to IDF's functions, so a private pool can never work there —
+// it silently handed out nothing. ESP32 allocates through heap_caps instead
+// (operator new below); the private pool remains for other platforms.
+#if defined(RNS_USE_TLSF) && !defined(ESP32)
+#define RNS_TLSF_POOL
+#endif
+
 using namespace RNS;
 using namespace RNS::Utilities;
 
@@ -37,22 +47,17 @@ size_t _contiguous_size = 0;
 // it filled) still go back to free().
 uintptr_t _tlsf_pool_start = 0;
 uintptr_t _tlsf_pool_end = 0;
-size_t _tlsf_used_bytes = 0;
-size_t _tlsf_peak_bytes = 0;
 
-#if defined(ESP32)
-// operator new/delete run on every task (loop, WiFi events, lwIP callbacks)
-// and TLSF has no locking of its own.
-portMUX_TYPE _tlsf_mux = portMUX_INITIALIZER_UNLOCKED;
-#define TLSF_LOCK()   portENTER_CRITICAL_SAFE(&_tlsf_mux)
-#define TLSF_UNLOCK() portEXIT_CRITICAL_SAFE(&_tlsf_mux)
-#else
-#define TLSF_LOCK()
-#define TLSF_UNLOCK()
-#endif
 
 /*static*/ //tlsf_t OS::_tlsf = tlsf_create_with_pool(malloc(1024 * 1024), 1024 * 1024);
 /*static*/ tlsf_t OS::_tlsf = nullptr;
+#endif
+
+#if defined(ESP32)
+// Set by OS::init_heap() once the Arduino core has brought PSRAM up (it does
+// so after C++ static constructors run). From then on operator new places
+// objects in PSRAM, keeping internal RAM for WiFi, lwIP, DMA and stacks.
+bool _new_in_psram = false;
 #endif
 
 uint32_t _new_count = 0;
@@ -63,33 +68,9 @@ uint32_t _delete_fault = 0;
 size_t _min_size = 0;
 size_t _max_size = 0;
 
-#if defined(RNS_USE_TLSF)
+#if defined(RNS_TLSF_POOL)
 static void tlsf_create_pool() {
-#if defined(ESP32)
-	// Runtime PSRAM detection — works on boards with or without PSRAM.
-	// Boards with PSRAM (e.g. V4 ESP32-S3FH4R2) get TLSF pool in SPIRAM,
-	// freeing internal SRAM for WiFi/LoRa/stack.
-	// Boards without PSRAM (e.g. V3 ESP32-S3FN8) skip TLSF entirely and
-	// use plain malloc() from internal SRAM — the ~170 KB heap is too small
-	// to dedicate to a TLSF pool while still running WiFi/LoRa/FreeRTOS.
-	size_t psram_size = ESP.getPsramSize();
-	void* raw_buffer = nullptr;
-	if (psram_size > 0) {
-		// PSRAM available — allocate TLSF pool from SPIRAM
-		size_t align = tlsf_align_size();
-		_contiguous_size = ESP.getMaxAllocPsram();
-		TRACEF("PSRAM detected: %u bytes total, %u bytes max contiguous", psram_size, _contiguous_size);
-		if (_buffer_size == 0) {
-			_buffer_size = (_contiguous_size * 4) / 5;
-		}
-		_buffer_size &= ~(align - 1);
-		raw_buffer = heap_caps_aligned_alloc(align, _buffer_size, MALLOC_CAP_SPIRAM);
-	}
-	else {
-		// No PSRAM — skip TLSF, all allocations go through malloc()
-		TRACEF("No PSRAM detected (%u bytes internal heap free), TLSF disabled", ESP.getFreeHeap());
-	}
-#elif defined(ARDUINO_ARCH_NRF52) || defined(ARDUINO_NRF52_ADAFRUIT)
+#if defined(ARDUINO_ARCH_NRF52) || defined(ARDUINO_NRF52_ADAFRUIT)
 	_contiguous_size = dbgHeapFree();
 	TRACEF("contiguous_size: %u", _contiguous_size);
 	if (_buffer_size == 0) {
@@ -140,22 +121,15 @@ static void tlsf_create_pool() {
 #endif
 
 /*static*/ void OS::init_heap() {
-#if defined(RNS_USE_TLSF) && defined(ESP32)
-	// The Arduino core brings PSRAM up in initArduino(), after C++ static
-	// constructors have run, so the first operator new cannot tell whether
-	// PSRAM exists. setup() calls this once it can; until then operator new
-	// uses malloc().
-	if (!_tlsf_init) {
-		_tlsf_init = true;
-		tlsf_create_pool();
-	}
+#if defined(ESP32)
+	_new_in_psram = ESP.getPsramSize() > 0;
 #endif
 }
 
 // CBA Added attribute weak to avoid collision with new override on nrf52
 void* operator new(size_t size) {
 //__attribute__((weak)) void* operator new(size_t size) {
-#if defined(RNS_USE_TLSF) && !defined(ESP32)
+#if defined(RNS_TLSF_POOL)
 	//if (OS::_tlsf == nullptr) {
 	if (!_tlsf_init) {
 		_tlsf_init = true;
@@ -172,20 +146,21 @@ void* operator new(size_t size) {
 		_max_size = size;
 	}
 	void* p = nullptr;
-#if defined(RNS_USE_TLSF)
-	if (OS::_tlsf != nullptr) {
-		TLSF_LOCK();
-		p = tlsf_malloc(OS::_tlsf, size);
-		if (p != nullptr) {
-			_tlsf_used_bytes += tlsf_block_size(p);
-			if (_tlsf_used_bytes > _tlsf_peak_bytes) {
-				_tlsf_peak_bytes = _tlsf_used_bytes;
-			}
-		}
-		TLSF_UNLOCK();
+#if defined(ESP32)
+	if (_new_in_psram) {
+		p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 	}
 	if (p == nullptr) {
-		// No pool yet, no pool on this board, or the pool is full.
+		// Before OS::init_heap(), on boards without PSRAM, or with PSRAM full.
+		p = malloc(size);
+		++_new_fault;
+	}
+#elif defined(RNS_TLSF_POOL)
+	if (OS::_tlsf != nullptr) {
+		p = tlsf_malloc(OS::_tlsf, size);
+	}
+	if (p == nullptr) {
+		// No pool on this board, or the pool is full.
 		p = malloc(size);
 		++_new_fault;
 	}
@@ -200,13 +175,13 @@ void* operator new(size_t size) {
 // CBA Added attribute weak to avoid collision with new override on nrf52
 void operator delete(void* p) {
 //__attribute__((weak)) void operator delete(void* p) {
-#if defined(RNS_USE_TLSF)
+#if defined(ESP32)
+	// heap_caps_malloc() and malloc() blocks both go back through free().
+	free(p);
+#elif defined(RNS_TLSF_POOL)
 	uintptr_t address = (uintptr_t)p;
 	if (OS::_tlsf != nullptr && address >= _tlsf_pool_start && address < _tlsf_pool_end) {
-		TLSF_LOCK();
-		_tlsf_used_bytes -= tlsf_block_size(p);
 		tlsf_free(OS::_tlsf, p);
-		TLSF_UNLOCK();
 	}
 	else {
 		//TRACEF("--- freeing memory (addr=%lx)", p);
@@ -229,7 +204,7 @@ void operator delete(void* p) {
 #endif
 }
 
-#if defined(RNS_USE_TLSF)
+#if defined(RNS_TLSF_POOL)
 uint32_t _tlsf_used_count = 0;
 uint32_t _tlsf_used_size = 0;
 uint32_t _tlsf_free_count = 0;
@@ -256,14 +231,12 @@ void dump_tlsf_stats() {
 	_tlsf_free_size = 0;
 	_tlsf_free_max_size = 0;
 	//TRACEF("TLSF Message: %s", _tlsf_msg);
-	// The walk visits every block with the pool locked, so only pay for it
-	// when the TRACE output it feeds will actually be printed.
+	// The walk visits every block, so only pay for it when the TRACE output
+	// it feeds will actually be printed.
 	if (OS::_tlsf == nullptr || loglevel() < LOG_TRACE) {
 		return;
 	}
-	TLSF_LOCK();
 	tlsf_walk_pool(tlsf_get_pool(OS::_tlsf), tlsf_mem_walker, nullptr);
-	TLSF_UNLOCK();
 	HEAD("TLSF Stats", LOG_TRACE);
 	TRACEF("Buffer Size:     %u", _buffer_size);
 	TRACEF("Contiguous Size: %u", _contiguous_size);
@@ -275,27 +248,11 @@ void dump_tlsf_stats() {
 }
 #endif
 
-/*static*/ size_t OS::heap_pool_size() {
-#if defined(RNS_USE_TLSF)
-	return OS::_tlsf != nullptr ? _buffer_size : 0;
+/*static*/ bool OS::heap_in_psram() {
+#if defined(ESP32)
+	return _new_in_psram;
 #else
-	return 0;
-#endif
-}
-
-/*static*/ size_t OS::heap_pool_used() {
-#if defined(RNS_USE_TLSF)
-	return _tlsf_used_bytes;
-#else
-	return 0;
-#endif
-}
-
-/*static*/ size_t OS::heap_pool_peak() {
-#if defined(RNS_USE_TLSF)
-	return _tlsf_peak_bytes;
-#else
-	return 0;
+	return false;
 #endif
 }
 
@@ -313,7 +270,7 @@ void dump_tlsf_stats() {
 	TRACEF("Min Size: %u", _min_size);
 	TRACEF("Max Size: %u", _max_size);
 	TRACEF("Avg Size: %u\n", (size_t)(_new_size / _new_count));
-#if defined(RNS_USE_TLSF)
+#if defined(RNS_TLSF_POOL)
 	dump_tlsf_stats();
 #endif
 }
@@ -321,9 +278,7 @@ void dump_tlsf_stats() {
 #else
 
 /*static*/ void OS::init_heap() {}
-/*static*/ size_t OS::heap_pool_size() { return 0; }
-/*static*/ size_t OS::heap_pool_used() { return 0; }
-/*static*/ size_t OS::heap_pool_peak() { return 0; }
+/*static*/ bool OS::heap_in_psram() { return false; }
 /*static*/ uint32_t OS::heap_fallback_count() { return 0; }
 
 #endif	// RNS_USE_ALLOCATOR
