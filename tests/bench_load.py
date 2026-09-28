@@ -45,7 +45,17 @@ class SerialCapture(threading.Thread):
         self.stop = threading.Event()
         self.lock = threading.Lock()
 
+    def wait_for_port(self, timeout=10):
+        # After a flash or watchdog reset the USB-Serial/JTAG port re-enumerates;
+        # it is briefly absent from /dev.
+        deadline = time.time() + timeout
+        while not os.path.exists(self.port):
+            if time.time() > deadline:
+                sys.exit(f"{self.port} did not appear within {timeout} s")
+            time.sleep(0.1)
+
     def reset_node(self):
+        self.wait_for_port()
         with serial.Serial(self.port, 115200, timeout=0.2) as s:
             s.dtr = False
             s.rts = True

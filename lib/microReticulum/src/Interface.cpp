@@ -151,3 +151,126 @@ TRACE(">>> Interface post: " + dst.debugString());
 	}
 }
 */
+
+// ── Ingress control, as Python RNS Interface ─────────────────────────────────
+// Announces for destinations not yet in the path table are held while their
+// source is bursting (Transport::inbound decides), then released one at a time
+// once it calms down (Transport::loop releases). Constants: Type.h.
+
+static std::string ingress_label(const Interface& interface, const IngressState& state) {
+	if (state.client < 0) { return interface.toString(); }
+	return interface.toString() + " client " + std::to_string(state.client);
+}
+
+// Announces per second over the last IA_FREQ_SAMPLES arrivals, counting the
+// time since the last one — Python's incoming_announce_frequency().
+static double incoming_announce_frequency(const IngressState& state, double now) {
+	uint8_t count = state.ia_count;
+	if (count < 2) { return 0; }
+	// Oldest sample first: the ring's next write slot once it is full.
+	uint8_t oldest = (count < IA_FREQ_SAMPLES) ? 0 : state.ia_next;
+	double delta_sum = 0;
+	for (uint8_t i = 1; i < count; i++) {
+		delta_sum += state.ia_times[(oldest + i) % IA_FREQ_SAMPLES] - state.ia_times[(oldest + i - 1) % IA_FREQ_SAMPLES];
+	}
+	delta_sum += now - state.ia_times[(oldest + count - 1) % IA_FREQ_SAMPLES];
+	if (delta_sum == 0) { return 0; }
+	return 1.0 / (delta_sum / count);
+}
+
+static double burst_threshold(const IngressState& state, double now) {
+	return (now - state.created < IC_NEW_TIME) ? IC_BURST_FREQ_NEW : IC_BURST_FREQ;
+}
+
+// Python's should_ingress_limit().
+static bool should_limit(const Interface& interface, IngressState& state, double now) {
+	double threshold = burst_threshold(state, now);
+	double ia_freq = incoming_announce_frequency(state, now);
+	if (state.burst_active) {
+		if (ia_freq < threshold && now > state.burst_activated + IC_BURST_HOLD) {
+			state.burst_active = false;
+			state.held_release = now + IC_BURST_PENALTY;
+			NOTICEF("[INGRESS] %s burst over, %u announces held, release in %us",
+			        ingress_label(interface, state).c_str(), (unsigned)state.held.size(), (unsigned)IC_BURST_PENALTY);
+		}
+		return true;
+	}
+	if (ia_freq > threshold) {
+		state.burst_active = true;
+		state.burst_activated = now;
+		NOTICEF("[INGRESS] %s burst: %.1f announces/s > %.1f, holding new destinations",
+		        ingress_label(interface, state).c_str(), ia_freq, threshold);
+		return true;
+	}
+	return false;
+}
+
+void Interface::received_announce() {
+	assert(_impl);
+	IngressState& state = _impl->ingress_source();
+	double now = Utilities::OS::time();
+	// Age for the new-interface threshold counts from the first announce:
+	// OS::time() jumps when Reticulum restores its saved time offset, after
+	// interfaces are registered, so a registration timestamp would make every
+	// interface look hours old.
+	if (state.created == 0) { state.created = now; }
+	state.ia_times[state.ia_next] = now;
+	state.ia_next = (state.ia_next + 1) % IA_FREQ_SAMPLES;
+	if (state.ia_count < IA_FREQ_SAMPLES) { state.ia_count++; }
+}
+
+bool Interface::should_ingress_limit() {
+	assert(_impl);
+	return should_limit(*this, _impl->ingress_source(), Utilities::OS::time());
+}
+
+void Interface::hold_announce(const Bytes& destination_hash, const Bytes& raw, uint8_t hops) {
+	assert(_impl);
+	IngressState& state = _impl->ingress_source();
+	for (auto& held : state.held) {
+		if (held.destination_hash == destination_hash) {
+			held.raw = raw;
+			held.hops = hops;
+			return;
+		}
+	}
+	// Python holds up to 256; that fits in PSRAM, not in a board's internal RAM.
+	size_t limit = Utilities::OS::heap_in_psram() ? MAX_HELD_ANNOUNCES : MAX_HELD_ANNOUNCES_SMALL;
+	if (state.held.size() >= limit) { return; }
+	HeldAnnounce held;
+	held.destination_hash = destination_hash;
+	held.raw = raw;
+	held.hops = hops;
+	state.held.push_back(held);
+}
+
+// Python's process_held_announces(), minus the inbound() call: one held
+// announce (fewest hops first) from each source that has calmed down.
+void Interface::collect_released_announces(std::vector<Bytes>& out) {
+	assert(_impl);
+	double now = Utilities::OS::time();
+	_impl->for_each_ingress([&](IngressState& state) {
+		if (state.held.empty() || should_limit(*this, state, now)) { return; }
+		if (now <= state.held_release) { return; }
+		if (incoming_announce_frequency(state, now) >= burst_threshold(state, now)) { return; }
+		size_t selected = state.held.size();
+		uint8_t min_hops = Type::Transport::PATHFINDER_M;
+		for (size_t i = 0; i < state.held.size(); i++) {
+			if (state.held[i].hops < min_hops) {
+				min_hops = state.held[i].hops;
+				selected = i;
+			}
+		}
+		if (selected == state.held.size()) { return; }
+		state.held_release = now + IC_HELD_RELEASE_INTERVAL;
+		out.push_back(state.held[selected].raw);
+		state.held.erase(state.held.begin() + selected);
+	});
+}
+
+size_t Interface::held_announce_count() const {
+	assert(_impl);
+	size_t held = 0;
+	_impl->for_each_ingress([&](IngressState& state) { held += state.held.size(); });
+	return held;
+}

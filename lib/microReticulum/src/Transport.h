@@ -410,6 +410,8 @@ namespace RNS {
 		static void write_tunnel_table();
 		static void persist_data();
 		static void clean_caches();
+		static void release_held_announces();
+		static size_t ingress_held_count();
 		static void clear_caches_in_memory();   // aggressive in-memory cache clearing for heap pressure
 		static void dump_stats();
 		static void dump_whitelists();

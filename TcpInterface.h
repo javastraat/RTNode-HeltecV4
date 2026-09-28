@@ -76,6 +76,7 @@ struct TcpClient {
     uint8_t    kiss_command;
     uint8_t    rxbuf[TCP_IF_HW_MTU];
     uint16_t   rxlen;
+    RNS::IngressState ingress;  // server mode: this client's ingress control
 };
 
 // ─── TcpInterface Class ─────────────────────────────────────────────────────
@@ -352,12 +353,32 @@ private:
         c.truncated = false;
         c.kiss_command = 0xFF;
         c.rxlen = 0;
+        c.ingress = RNS::IngressState();  // its held announces go with it, as in Python
         _num_clients--;
 
         uint32_t heap_after = ESP.getFreeHeap();
         Serial.printf("[TcpIF] Client %d %s (heap: %u -> %u, delta: %+d)\r\n",
                       idx, reason, heap_before, heap_after,
                       (int)(heap_after - heap_before));
+    }
+
+    // Ingress control: Python spawns an interface per accepted TCP client, each
+    // with its own announce-burst state, so one flooding client does not get
+    // every other client's announces held. Server mode keeps a state per
+    // client slot; client mode (one connection) uses the interface's own.
+    virtual RNS::IngressState& ingress_source() override {
+        if (_mode == TCP_IF_MODE_SERVER && _last_rx_client_idx >= 0 && _last_rx_client_idx < TCP_IF_MAX_CLIENTS) {
+            return _clients[_last_rx_client_idx].ingress;
+        }
+        return _ingress;
+    }
+
+    virtual void for_each_ingress(const std::function<void(RNS::IngressState&)>& visit) override {
+        visit(_ingress);
+        if (_mode != TCP_IF_MODE_SERVER) return;
+        for (int i = 0; i < TCP_IF_MAX_CLIENTS; i++) {
+            if (_clients[i].active) visit(_clients[i].ingress);
+        }
     }
 
     void _deliver_frame(int idx) {
@@ -498,6 +519,8 @@ private:
                 _clients[i].kiss_command = 0xFF;
                 _clients[i].rxlen = 0;
                 _clients[i].last_activity = millis();
+                _clients[i].ingress = RNS::IngressState();
+                _clients[i].ingress.client = i;
                 _num_clients++;
                 Serial.printf("[TcpIF] Client %d connected from %s\r\n",
                               i, _clients[i].client.remoteIP().toString().c_str());

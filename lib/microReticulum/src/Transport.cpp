@@ -409,6 +409,39 @@ static inline bool is_resource_ctx(uint8_t ctx) {
 		jobs();
 		_jobs_last_run = OS::time();
 	}
+	release_held_announces();
+}
+
+// Ingress control, as Python RNS's interface jobs: every INTERFACE_JOBS_INTERVAL
+// each interface may hand back one held announce, which goes through inbound()
+// again. Runs outside jobs(): outbound() waits while _jobs_running is set.
+/*static*/ void Transport::release_held_announces() {
+	static const double INTERFACE_JOBS_INTERVAL = 5.0;  // Python Transport.interface_jobs_interval
+	static double last_run = 0;
+	double now = OS::time();
+	if (now < last_run + INTERFACE_JOBS_INTERVAL) { return; }
+	last_run = now;
+	std::vector<std::pair<Bytes, Interface>> releases;
+	for (auto& [hash, interface] : _interfaces) {
+		std::vector<Bytes> released;
+		interface.collect_released_announces(released);
+		for (auto& raw : released) {
+			releases.push_back({raw, interface});
+		}
+	}
+	for (auto& [raw, interface] : releases) {
+		VERBOSEF("[INGRESS] %s releasing a held announce (%u still held)", interface.toString().c_str(),
+		         (unsigned)interface.held_announce_count());
+		inbound(raw, interface);
+	}
+}
+
+/*static*/ size_t Transport::ingress_held_count() {
+	size_t held = 0;
+	for (auto& [hash, interface] : _interfaces) {
+		held += interface.held_announce_count();
+	}
+	return held;
 }
 
 /*static*/ void Transport::jobs() {
@@ -2323,6 +2356,24 @@ static inline bool is_resource_ctx(uint8_t ctx) {
 		if (packet.packet_type() == Type::Packet::ANNOUNCE) {
 			TRACE("Transport::inbound: Packet is ANNOUNCE");
 			DEBUG("DIAG: ANNOUNCE-IN dest=" + packet.destination_hash().toHex().substr(0,8) + " iface=" + packet.receiving_interface().toString() + " hops=" + std::to_string(packet.hops()));
+
+			// Ingress control (Python RNS Transport.inbound): an announce for a
+			// destination not yet in the path table is held while its interface
+			// is bursting; known destinations' re-announces are left to announce
+			// rate limiting. Python counts only announces whose signature checks
+			// out; this counts every one, since checking signatures is the work a
+			// flood makes an ESP32 do. raw_in is held as it arrived, IFAC and
+			// all, so a released announce is verified again.
+			if (interface) {
+				Interface receiving = interface;
+				receiving.received_announce();
+				if (_destination_table.find(packet.destination_hash()) == _destination_table.end()
+				    && receiving.should_ingress_limit()) {
+					receiving.hold_announce(packet.destination_hash(), raw_in, packet.hops());
+					return;
+				}
+			}
+
 			Bytes received_from;
 #if defined(DESTINATIONS_SET)
 			//Destination local_destination({Type::NONE});

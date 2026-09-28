@@ -8,6 +8,7 @@
 #include <ArduinoJson.h>
 
 #include <list>
+#include <functional>
 #include <memory>
 #include <cassert>
 #include <stdint.h>
@@ -32,6 +33,30 @@ namespace RNS {
 		uint8_t _hops = 0;
 		uint64_t _emitted = 0;
 		Bytes _raw;
+	};
+
+	// An announce held by ingress control. raw is the packet exactly as it
+	// arrived (IFAC included), so a released announce is verified again.
+	struct HeldAnnounce {
+		Bytes destination_hash;
+		Bytes raw;
+		uint8_t hops = 0;
+	};
+
+	// Ingress control state (Python RNS Interface; Type::Interface IC_*). One
+	// per interface, or one per client on an interface that multiplexes
+	// clients (TcpInterface) — where Python spawns an interface per client, so
+	// one flooding client does not get every other client's announces held.
+	struct IngressState {
+		int8_t client = -1;         // client slot, for logs; -1 for the interface itself
+		double created = 0;         // first announce seen; age decides the burst threshold
+		double ia_times[Type::Interface::IA_FREQ_SAMPLES] = {};
+		uint8_t ia_count = 0;
+		uint8_t ia_next = 0;
+		bool burst_active = false;
+		double burst_activated = 0;
+		double held_release = 0;
+		std::vector<HeldAnnounce> held;
 	};
 
 	class InterfaceImpl : public std::enable_shared_from_this<InterfaceImpl> {
@@ -93,6 +118,13 @@ namespace RNS {
 		bool _is_local_client = false;
 		//Bytes _hash;
 		HInterface _parent_interface;
+		// Ingress control (Python RNS Interface; Type::Interface IC_*).
+		IngressState _ingress;
+		// The ingress state of whoever is delivering the packet now: this
+		// interface's own, or a client's on interfaces that multiplex clients.
+		virtual IngressState& ingress_source() { return _ingress; }
+		// Every ingress state this interface keeps, for releases and counts.
+		virtual void for_each_ingress(const std::function<void(IngressState&)>& visit) { visit(_ingress); }
 		//Transport& _owner;
 
 	friend class Interface;
@@ -200,6 +232,15 @@ namespace RNS {
 		inline uint8_t ifac_size() const { assert(_impl); return _impl->_ifac_size; }
 		inline void ifac_size(uint8_t size) { assert(_impl); _impl->_ifac_size = size; }
 		void setup_ifac(const char* ifac_netname, const char* ifac_netkey);
+		// Ingress control (Python RNS Interface).
+		// These act on the ingress state of the packet being delivered.
+		void received_announce();
+		bool should_ingress_limit();
+		void hold_announce(const Bytes& destination_hash, const Bytes& raw, uint8_t hops);
+		// At most one held announce per calmed ingress state (Python's
+		// process_held_announces), for Transport to feed back through inbound().
+		void collect_released_announces(std::vector<Bytes>& out);
+		size_t held_announce_count() const;
 		inline Type::Interface::modes mode() const { assert(_impl); return _impl->_mode; }
 		inline void mode(Type::Interface::modes mode) { assert(_impl); _impl->_mode = mode; }
 		inline uint32_t bitrate() const { assert(_impl); return _impl->_bitrate; }

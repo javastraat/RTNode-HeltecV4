@@ -300,6 +300,19 @@ namespace RNS { namespace Type {
 			MODE_GATEWAY        = 0x40,
 		};
 
+		// Ingress control, as Python RNS Interface (IC_*): announces for
+		// destinations not yet in the path table are held while an interface
+		// is bursting, then released one at a time.
+		static const uint8_t  IA_FREQ_SAMPLES          = 6;
+		static const uint16_t MAX_HELD_ANNOUNCES       = 256;
+		static const uint16_t MAX_HELD_ANNOUNCES_SMALL = 32;    // boards whose heap is internal RAM
+		static const uint32_t IC_NEW_TIME              = 2*60*60;
+		static constexpr double IC_BURST_FREQ_NEW      = 3.5;
+		static constexpr double IC_BURST_FREQ          = 12;
+		static const uint16_t IC_BURST_HOLD            = 1*60;
+		static const uint16_t IC_BURST_PENALTY         = 5*60;
+		static const uint16_t IC_HELD_RELEASE_INTERVAL = 30;
+
 	}
 
 	namespace Packet {

@@ -12,6 +12,7 @@
 #include <WiFi.h>
 #include <esp_heap_caps.h>
 #include <Utilities/OS.h>
+#include <Transport.h>
 
 namespace res {
 
@@ -86,7 +87,7 @@ void report() {
     Serial.printf(
         "[RES] t=%lu heap=%u/%u/%u psram=%u/%u new=%s loops=%lu max=%lums p99%sms "
         "over20=%lu over100=%lu over1000=%lu lora_tx=%lums/%lu flash=%lums/%lu tcp=%lums/%lu "
-        "q_hw=%u q_drop=%lu wifi=%d/%d\r\n",
+        "q_hw=%u q_drop=%lu ic_held=%u wifi=%d/%d\r\n",
         (unsigned long)millis(),
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
         (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
@@ -105,6 +106,7 @@ void report() {
         (unsigned long)(delta_us[TCP] / 1000), (unsigned long)delta_ops[TCP],
         (unsigned)window.lora_queue_high_water,
         (unsigned long)window.lora_drops,
+        (unsigned)RNS::Transport::ingress_held_count(),
         (int)WiFi.status(), (int)WiFi.RSSI());
     window = Window{};
 }
