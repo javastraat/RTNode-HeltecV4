@@ -99,7 +99,7 @@ def main():
 
     out = args.out or os.path.join(HERE, "bench-results", time.strftime("%Y%m%d-%H%M%S") + "-ingress-release")
     os.makedirs(out, exist_ok=True)
-    capture = start_bench_node(args.serial, args.host, args.port, out, flood=True)
+    capture = start_bench_node(args.serial, args.host, args.port, out, isolated=True)
     time.sleep(10)
 
     import RNS

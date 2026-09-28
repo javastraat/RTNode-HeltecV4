@@ -1024,6 +1024,20 @@ void setup() {
       firewall_state.ap_tcp_enabled = true;
       firewall_state.ap_tcp_port = 4242;
       Serial.write("[BENCH] overrides: backbones off, local TCP server on 4242 (saved settings untouched)\r\n");
+#ifdef RTNODE_BENCH_ADVERT
+      // Advert test build (env rtnode_heltec_v4_bench_advert,
+      // tests/bench_advert_ifac.py): IFAC and advertising on with throwaway
+      // credentials. publish_ifac stays as saved unless RTNODE_BENCH_PUBLISH_IFAC.
+      firewall_state.ifac_enabled = true;
+      strncpy(firewall_state.ifac_netname, "rtnode-bench", sizeof(firewall_state.ifac_netname) - 1);
+      strncpy(firewall_state.ifac_passphrase, "bench-only-not-secret", sizeof(firewall_state.ifac_passphrase) - 1);
+      firewall_state.advert_enabled = true;
+#ifdef RTNODE_BENCH_PUBLISH_IFAC
+      firewall_state.advert_publish_ifac = true;
+#endif
+      Serial.printf("[BENCH] overrides: IFAC and advert on (test credentials), publish_ifac=%d\r\n",
+                    (int)firewall_state.advert_publish_ifac);
+#endif
 #endif
 
       // Bridge probe toggle to Transport (read before Transport::start())
