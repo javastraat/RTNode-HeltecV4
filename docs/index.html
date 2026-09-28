@@ -199,6 +199,11 @@
     }
     .version-row select {
       flex: 1;
+      /* A flex item never shrinks below its longest option by default, and
+         release names are long: let it shrink and cut the text instead. */
+      min-width: 0;
+      max-width: 100%;
+      text-overflow: ellipsis;
       background: var(--bg);
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -464,7 +469,10 @@
 
   function formatReleaseLabel(tag, name, stability) {
     const channel = stability ? String(stability) : RELEASE_CHANNEL;
-    const base = `${tag}${name && name !== tag ? ' — ' + name : ''}`;
+    // Release names start with their tag ("v1.0.51 — ..."): show it once.
+    let title = name || '';
+    if (title.startsWith(tag)) title = title.slice(tag.length).replace(/^\s*[—–-]\s*/, '');
+    const base = title ? `${tag} — ${title}` : tag;
     if (base.toLowerCase().includes(channel.toLowerCase())) {
       return base;
     }
