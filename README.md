@@ -157,7 +157,7 @@ When active, the device creates a WiFi access point named **`RNode-Boundary-Setu
 
 ### Config Page Options
 
-The web form has four sections:
+The web form's sections include:
 
 #### 📶 WiFi Network
 | Field | Description |
@@ -179,6 +179,11 @@ The web form has four sections:
 | **Local TCP Server** | Enable/Disable — runs a TCP server on your WiFi for local Reticulum nodes to connect |
 | **TCP Port** | Port to listen on (default: `4242`) |
 
+#### 📱 Bluetooth (V4)
+| Field | Description |
+|-------|-------------|
+| **Bluetooth Peers** | Enable/Disable — lets phones running [Columba](https://github.com/torlando-tech/columba), and Prns nodes, join the local network over Bluetooth LE, up to four at a time. **Enabled by default.** Bluetooth peers are LAN-side, trusted like LoRa; takes effect after a restart and uses about 70 KB of memory while on |
+
 #### 📻 LoRa Radio
 | Field | Description |
 |-------|-------------|
@@ -197,9 +202,9 @@ When enabled, the firmware periodically (~every 6 hours, matching the Reticulum 
 - Discovery name (`RTNode-<short-hash>`)
 - Latitude, longitude and height (decimal degrees / metres)
 - Operating LoRa parameters (frequency, bandwidth, spreading factor, coding rate)
-- IFAC network name and key, when configured
+- IFAC network name and key — only when **Publish Network Access (IFAC)** is set to Yes (default No), as in Reticulum's `publish_ifac`
 
-The payload is sealed with an LXMF proof-of-work stamp (cost 14, matching `RNS/Discovery.py`'s `DEFAULT_STAMP_VALUE`), and the resulting stamp is cached so the proof-of-work only re-runs when the advertised parameters change.
+The payload is sealed with an LXMF proof-of-work stamp (value 16, Reticulum 1.5.2's `DEFAULT_STAMP_VALUE`, which 1.5.2 nodes require), worked in short slices so the node keeps running meanwhile; the stamp is cached so the proof-of-work only re-runs when the advertised parameters change.
 
 | Field | Description |
 |-------|-------------|
@@ -208,6 +213,7 @@ The payload is sealed with an LXMF proof-of-work stamp (cost 14, matching `RNS/D
 | **Longitude** | GPS longitude in decimal degrees (e.g. `-122.419416`). East positive, West negative. Leave blank to omit |
 | **Use Browser Location** | Button that fills the latitude/longitude fields from the browser's geolocation service (requires user permission; some browsers block it on plain HTTP origins) |
 | **Randomize Offset** | When enabled, the *advertised* coordinates are shifted by a deterministic per-device offset of approximately half a kilometre (about half a mile) for privacy. The exact stored coordinates are not changed, and the offset is stable across announces so the pin doesn't move around |
+| **Publish Network Access (IFAC)** | Include the IFAC network name and passphrase in the advertisement. Default **No**: anyone who hears the advertisement could then join the IFAC-protected network |
 
 After saving, the device reboots with the new configuration applied.
 
@@ -218,7 +224,7 @@ The 128×64 OLED is split into two panels:
 ### Left Panel — Status Indicators (64×64)
 
 ```
- ● LORA          ← filled circle = radio online
+ ● LORA  ● BLE   ← radio online; BLE filled = a Bluetooth peer connected (V4)
  ○ wifi          ← unfilled circle = WiFi disconnected
  ● WAN           ← filled = backbone TCP connected
  ● LAN           ← filled = local TCP client connected
@@ -230,6 +236,7 @@ The 128×64 OLED is split into two panels:
 - **Filled circle (●)** = active/connected
 - **Unfilled circle (○)** = inactive/disconnected
 - Labels are UPPERCASE when active, lowercase when inactive (except LAN which is always uppercase)
+- **BLE** sits beside LORA on the V4: `ble` with an unfilled circle while Bluetooth waits for a peer, `BLE` filled once a Columba phone or Prns node is connected. **Hidden** when Bluetooth is disabled in configuration
 - **LAN row is hidden** when the Local TCP Server is disabled in configuration — the remaining layout stays in place
 
 ### Right Panel — Device Info (64×64)
