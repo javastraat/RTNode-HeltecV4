@@ -2679,7 +2679,6 @@ static uint32_t ingress_dropped = 0;
 			WLOG(packet, "TO: " + short_hash(packet.destination_hash()) + " (" + dest_zone(packet.destination_hash()) + ") - LINKREQ-IN");
 			if (!packet.transport_id() || packet.transport_id() == _identity.hash()) {
 				TRACE("Transport::inbound: Checking if LINKREQUEST is for local destination");
-				bool found_local = false;
 #if defined(DESTINATIONS_SET)
 				for (auto& destination : _destinations) {
 					if (destination.hash() == packet.destination_hash() && destination.type() == packet.destination_type()) {
@@ -2691,7 +2690,6 @@ static uint32_t ingress_dropped = 0;
 #endif
 						TRACE("Transport::inbound: Found local destination for LINKREQUEST");
 						packet.destination(destination);
-						found_local = true;
 #if defined(DESTINATIONS_SET)
 						const_cast<Destination&>(destination).receive(packet);
 #else
@@ -2699,48 +2697,15 @@ static uint32_t ingress_dropped = 0;
 #endif
 					}
 				}
-#ifdef FIREWALL_MODE
-				// Forward non-local link requests from non-backbone to backbone
-				if (!found_local && !is_backbone_interface(packet.receiving_interface())) {
-					// Match Python: use the path table to find the correct
-					// outbound interface, not broadcast to all backbones.
-					Interface outbound_iface({Type::NONE});
-					if (has_path(packet.destination_hash())) {
-						const PathEntry* entry = select_path(packet.destination_hash());
-						if (entry) {
-							outbound_iface = find_interface_from_hash(entry->receiving_interface);
-						}
-					}
-					// Fallback: use first connected backbone interface
-					if (!outbound_iface) {
-						for (auto& [hash, iface] : _interfaces) {
-							if (is_backbone_interface(iface)) {
-								outbound_iface = iface;
-								break;
-							}
-						}
-					}
-					WLOG(packet, "TO: " + short_hash(packet.destination_hash()) + " (" + dest_zone(packet.destination_hash()) + ") - FWD: " + outbound_iface.toString() + " (" + zone_tag(is_backbone_interface(outbound_iface)) + ") LINKREQ");
-					if (outbound_iface && outbound_iface != packet.receiving_interface()) {
-						double now = OS::time();
-						uint8_t actual_hops = 1;
-						if (has_path(packet.destination_hash())) {
-							actual_hops = hops_to(packet.destination_hash());
-							if (actual_hops < 1) actual_hops = 1;
-						}
-						LinkEntry link_entry(now, packet.destination_hash(), outbound_iface, actual_hops,
-							packet.receiving_interface(), packet.hops(),
-							packet.destination_hash(), false,
-							Transport::extra_link_proof_timeout(packet.receiving_interface())
-								+ now + (Type::Link::ESTABLISHMENT_TIMEOUT_PER_HOP * actual_hops));
-						Bytes link_id = Link::link_id_from_lr_packet(packet);
-						_link_table.erase(link_id);
-						_link_table.insert({link_id, link_entry});
-						wl2_push(link_id);
-						transmit(outbound_iface, packet.raw());
-					}
-				}
-#endif
+				// Link requests to destinations that are not ours were already
+				// forwarded above: by transport when addressed to us, or by the
+				// firewall's FWD-CHECK when they came from the LAN without a
+				// transport header. A firewall block here sent every such request
+				// again, raw, to the path's interface (or the first backbone when
+				// there was no path, where no transport node takes it) and
+				// replaced the link entry forwarding had just made. Over LoRa the
+				// second copy went out while the destination was sending its
+				// link proof, and the proof was lost.
 			}
 		}
 		
