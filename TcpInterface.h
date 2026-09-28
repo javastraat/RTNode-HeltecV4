@@ -40,6 +40,13 @@
 #define TCP_IF_RECONNECT_GIVEUP  12      // consecutive failures before giving up entirely
 #define TCP_IF_KEEPALIVE_INTERVAL 30000  // ms — send empty HDLC frames to keep link alive
 #define TCP_IF_POLL_INTERVAL     10      // ms
+// Frames delivered per client per loop() pass. A busy connection (a backbone
+// relaying a flood) otherwise had its whole burst processed in one pass -
+// up to 360 ms on the bench, ~210 ms with the budget - while LoRa,
+// Bluetooth and the other TCP clients waited. What is left waits in the
+// socket for the next pass, and TCP flow control holds the sender back if
+// the node falls behind. (A single accepted announce still costs ~100 ms.)
+#define TCP_IF_FRAMES_PER_PASS   4
 
 // HDLC-like framing for TCP (matches Reticulum-rust tcp_interface)
 #define HDLC_FLAG  0x7E
@@ -76,6 +83,7 @@ struct TcpClient {
     uint8_t    kiss_command;
     uint8_t    rxbuf[TCP_IF_HW_MTU];
     uint16_t   rxlen;
+    uint32_t   frames_in;            // delivered frames, for the per-pass budget
     RNS::IngressState ingress;  // server mode: this client's ingress control
 };
 
@@ -245,8 +253,9 @@ public:
                 continue;
             }
 
-            // Read available bytes and deframe
-            while (_clients[i].client.available()) {
+            // Read available bytes and deframe, up to the per-pass budget
+            const uint32_t budget_end = _clients[i].frames_in + TCP_IF_FRAMES_PER_PASS;
+            while (_clients[i].frames_in != budget_end && _clients[i].client.available()) {
                 uint8_t byte = _clients[i].client.read();
                 _clients[i].last_activity = millis();
                 _hdlc_deframe(i, byte);
@@ -384,6 +393,7 @@ private:
 
     void _deliver_frame(int idx) {
         TcpClient& c = _clients[idx];
+        c.frames_in++;
         RNS::Bytes data(c.rxbuf, c.rxlen);
         _last_rx_client_idx = idx;
         _last_rx_data = data;
