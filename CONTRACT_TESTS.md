@@ -166,9 +166,11 @@ All on `bench/instrumentation`, found by these suites:
   filesystem, Transport), `[JOBS]` (a Transport jobs run of 100 ms or more,
   by section) and `[RJOBS]` (cache clean or persist of 50 ms or more) — and
   under the WAN suite they show three things:
-  - the TCP interfaces process a whole burst of received packets in one
-    pass (up to 360 ms under the flood) while the other radios wait; a
-    per-pass budget in `TcpInterface::loop()` would bound that;
+  - the TCP interfaces processed a whole burst of received packets in one
+    pass (up to 360 ms under the flood) while the other radios waited; a
+    budget of four frames per client per pass (f666ba6) brought the worst
+    pass to ~210 ms — what is left is single packets that are expensive on
+    their own;
   - releasing one held announce costs ~100 ms (verification and path work),
     every 5 s during a burst;
   - the once-a-minute stall is `persist_data()` (0.3–1.2 s) plus cache clean
@@ -208,3 +210,5 @@ All on `bench/instrumentation`, found by these suites:
 | 2026-09-28 | same | soak tcp,prnsd,lora + wan, 30 min | **5/5** | WiFi↔BT 1643/1643 echoes (p50 380, p95 614 ms), 29/29 resources; WAN↔WiFi 891/891 (p50 236, p95 602 ms), 14/14 resources; WiFi↔LoRa 59/60 and BT↔LoRa 29/30 (p50 5.4 s); no reboot or panic, heap min 118 KB, stall max 992 ms, no Bluetooth disconnect, no LoRa queue or split drops |
 | 2026-09-28 | + backbone proof filter (5eb13db), loop-time causes | wan tcp,tcp2 | **18/18** | with lan-packet-wan and wan-packet-lan (3/3 arrived, 3/3 proved each way); flood: 1201 announces, 0 leaked, LAN–WAN echo p50 752 ms |
 | 2026-09-28 | same | lan tcp,prnsd,lora | **20/20** | with single packets on every pair (3/3 arrived, 3/3 proved, LoRa included); LoRa echo RTT p50 7.8–9.8 s |
+| 2026-09-28 | + slow-pass lines (202ea41), TCP frame budget (f666ba6) | wan tcp,tcp2 | **18/18** | flood: LAN–LAN echo p50 262 ms (was ~300); LAN–WAN p50 ~860 ms, dominated by the WAN test agent processing the whole flood itself |
+| 2026-09-28 | f666ba6 | lan tcp,prnsd,lora | **20/20** | final regression |
