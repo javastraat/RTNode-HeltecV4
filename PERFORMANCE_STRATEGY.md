@@ -309,6 +309,24 @@ client's announce was not rebroadcast until an unrelated client connected
 Released firmware has the WL-BLOCK case: on a backbone, each dropped unknown
 packet pauses `jobs()` until the next packet passes.
 
+**Device advertisement stamp (2026-09-28).** Two faults in
+[Advertise.h](Advertise.h), found while testing the IFAC change:
+
+- *Value.* RNS 1.5.2 raised the discovery stamp value from 14 to 16, and a
+  1.5.2 node requires 16 by default (`required_discovery_value`). RTNode
+  stamped at 14, so such a node ignored its advert three times in four.
+- *Blocking.* The proof-of-work ran in one piece inside `loop()`, copying the
+  5 KB workblock into a new buffer and hashing all of it for every
+  candidate: 12.7 s and 28.0 s of dead node on the bench at value 14 — past
+  a Linux `rnsd` peer's 24 s TCP timeout — whenever the advertised info
+  changes. Value 16 is four times the work.
+
+Now each workblock round is hashed in as it is made (one per loop pass,
+never stored) and every candidate starts from the SHA-256 state after the
+workblock, so it costs one 64-byte block; the search runs 2 ms per loop
+pass. Value-16 stamps took 0.8 s and 1.5 s with no stall. The NVS stamp
+cache records the value, so a stamp cached at 14 is not reused.
+
 **Fix direction** (each measured on its own, rule 1)
 
 - Event-driven LoRa TX: route TxDone to DIO1, send one packet per TxDone
@@ -446,7 +464,12 @@ reference (Prns has not tested its R8 support on hardware either).
    ([Advertise.h](Advertise.h), `include_ifac`), although the portal tells
    users IFAC restricts access. The reference RNS publishes them only with
    `publish_ifac = yes`, which defaults to off. Make it opt-in, default off,
-   before Bluetooth adds a second IFAC-protected medium.
+   before Bluetooth adds a second IFAC-protected medium. **Done**
+   (2026-09-28, branch `fix/ifac-publish-opt-in`, off `main`): portal
+   setting "Publish Network Access (IFAC)", default No, config byte 0x23D
+   (never used before, so every existing save reads "no"). Found alongside
+   it, fixed on `fix/advert-stamp-nonblocking`: see "Device advertisement
+   stamp" below.
 6. **Bluetooth spike.** NimBLE on a V4, advertising, scanning and holding four
    connections, under scenario B. Record heap and WiFi-health cost.
 7. **Bluetooth native GATT** → **Columba characteristics** → **L2CAP**, each
@@ -481,3 +504,5 @@ Each step's results go in the log below before the next step starts.
 | 2026-09-27 | 1.5.2 ingress rules (d0d15cf) | V4.2 | ingress release test | — | — | — | — | `tests/bench_ingress_release.py` PASS: burst at the third announce; nothing leaked during the hold; burst over 16.5 s after the flood stopped; releases 0.5 s later, then 5.2 s apart, oldest first |
 | 2026-09-27 | 1.5.2 ingress rules (d0d15cf) | V4.2 | B flood 5/s 150 s | 197 KB | ≤ 5 ms / 521 ms | 0 % / 166 ms | 0 | path test PASS 0.90 s; ic_held=256 ic_drop=488 |
 | 2026-09-27 | 1.5.2 ingress rules (d0d15cf) | V4.2 | B flood 10/s 150 s | 197 KB | ≤ 5 ms / 401 ms | 0 % / 157 ms | 0 | path test PASS 0.43 s; ic_held=256 ic_drop=1226 |
+| 2026-09-28 | + publish_ifac opt-in (77f3492) | V4.2 | advert test, `tests/bench_advert_ifac.py` | — | — | — | — | PASS both ways: saved setting unset → no credentials; opted in → name and passphrase. Stamp at value 14 blocked `loop()` 28.0 s and 12.7 s; one came out at 14, ignored by a default 1.5.2 node |
+| 2026-09-28 | + sliced value-16 stamp (f4569b3) | V4.2 | advert test | — | — | — | — | PASS both ways as a default 1.5.2 listener; stamps of value 18 in 0.8 s and 1.5 s (15,466 and 30,460 attempts), no `[STALL]` |
