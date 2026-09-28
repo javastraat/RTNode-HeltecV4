@@ -52,6 +52,16 @@ class SerialCapture(threading.Thread):
             time.sleep(0.1)
             s.rts = False
 
+    def watchdog_reset_node(self):
+        # On the V4's USB-Serial/JTAG port an RTS reset can leave the chip in
+        # the ROM bootloader (silent, no WiFi), notably with a battery keeping
+        # it powered. esptool's watchdog reset always starts the app.
+        esptool = os.path.expanduser("~/.platformio/packages/tool-esptoolpy/esptool.py")
+        python = os.path.expanduser("~/.platformio/penv/bin/python")
+        subprocess.run([python, esptool, "--chip", "esp32s3", "-p", self.port,
+                        "--before", "default_reset", "--after", "watchdog_reset", "chip_id"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+
     def run(self):
         buffer, link = b"", None
         with open(self.path, "w") as out:
@@ -255,8 +265,16 @@ def main():
     reset_at = time.time()
     capture.reset_node()
     capture.start()
-    if not capture.wait_for("[RES] boot", reset_at, 90):
-        sys.exit("node did not print its [RES] boot mark within 90 s — is the bench build flashed?")
+    if not capture.wait_for("[RES] boot", reset_at, 30):
+        print("no boot mark after an RTS reset; trying esptool's watchdog reset", flush=True)
+        capture.stop.set()
+        capture.join(timeout=5)
+        capture = SerialCapture(args.serial, os.path.join(out, "serial.log"))
+        reset_at = time.time()
+        capture.watchdog_reset_node()
+        capture.start()
+        if not capture.wait_for("[RES] boot", reset_at, 60):
+            sys.exit("node did not print its [RES] boot mark — is the bench build flashed?")
     if args.scenario == "lan-flood":
         if not capture.wait_for("[BENCH] overrides: backbones off", reset_at, 5):
             sys.exit("no 'backbones off' mark: refusing to flood a node that may be connected to a public backbone")
