@@ -365,8 +365,11 @@ static RNS::Bytes advertise_build_info() {
     RNS::Bytes packed;
 
     // Determine which optional fields will be included so we can write a
-    // correct map header up front.
+    // correct map header up front. The IFAC network name and passphrase go
+    // out only when the user opted in, as RNS's publish_ifac (default off):
+    // anyone who hears the advert can use them to join.
     bool include_ifac =
+        firewall_state.advert_publish_ifac &&
         firewall_state.ifac_enabled &&
         (firewall_state.ifac_netname[0] != '\0' ||
          firewall_state.ifac_passphrase[0] != '\0');
@@ -374,7 +377,7 @@ static RNS::Bytes advertise_build_info() {
     // Required keys: INTERFACE_TYPE, TRANSPORT, TRANSPORT_ID, NAME,
     //                LATITUDE, LONGITUDE, HEIGHT,
     //                FREQUENCY, BANDWIDTH, SPREADINGFACTOR, CODINGRATE
-    // Optional keys: IFAC_NETNAME, IFAC_NETKEY (if publish_ifac equivalent)
+    // Optional keys: IFAC_NETNAME, IFAC_NETKEY (publish_ifac)
     uint32_t map_entries = 11;
     if (include_ifac) map_entries += 2;
 
