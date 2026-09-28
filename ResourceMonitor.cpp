@@ -135,14 +135,18 @@ void loop_end() {
     window.bucket[b]++;
 
     if (elapsed >= STALL_REPORT_US) {
-        Serial.printf("[STALL] t=%lu %lums lora_tx=%lums/%lu flash=%lums/%lu tcp=%lums/%lu\r\n",
+        uint32_t attributed = 0;
+        for (size_t c = 0; c < CAUSE_COUNT; c++) attributed += cause_us[c] - loop_start_cause_us[c];
+        uint32_t other = elapsed > attributed ? elapsed - attributed : 0;
+        Serial.printf("[STALL] t=%lu %lums lora_tx=%lums/%lu flash=%lums/%lu tcp=%lums/%lu other=%lums\r\n",
                       (unsigned long)millis(), (unsigned long)(elapsed / 1000),
                       (unsigned long)((cause_us[LORA_TX] - loop_start_cause_us[LORA_TX]) / 1000),
                       (unsigned long)(cause_ops[LORA_TX] - loop_start_cause_ops[LORA_TX]),
                       (unsigned long)((cause_us[FLASH] - loop_start_cause_us[FLASH]) / 1000),
                       (unsigned long)(cause_ops[FLASH] - loop_start_cause_ops[FLASH]),
                       (unsigned long)((cause_us[TCP] - loop_start_cause_us[TCP]) / 1000),
-                      (unsigned long)(cause_ops[TCP] - loop_start_cause_ops[TCP]));
+                      (unsigned long)(cause_ops[TCP] - loop_start_cause_ops[TCP]),
+                      (unsigned long)(other / 1000));
     }
 
     uint32_t now = millis();

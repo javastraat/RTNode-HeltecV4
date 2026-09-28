@@ -155,13 +155,14 @@ def summarise(args, serial_lines, ping_lines, flood_lines, window_start, window_
     for t, text in serial_lines:
         if t < window_start - 2 or t > window_end + 2:
             continue
-        match = re.search(r"\[STALL\] t=\d+ (\d+)ms lora_tx=(\d+)ms/(\d+) flash=(\d+)ms/(\d+) tcp=(\d+)ms/(\d+)", text)
+        match = re.search(r"\[STALL\] t=\d+ (\d+)ms lora_tx=(\d+)ms/(\d+) flash=(\d+)ms/(\d+) tcp=(\d+)ms/(\d+)(?: other=(\d+)ms)?", text)
         if match:
             duration = int(match.group(1)) / 1000.0
             stalls.append({"start": t - duration, "end": t, "ms": int(match.group(1)),
                            "lora_tx_ms": int(match.group(2)), "lora_tx_packets": int(match.group(3)),
                            "flash_ms": int(match.group(4)), "flash_ops": int(match.group(5)),
-                           "tcp_ms": int(match.group(6)), "tcp_ops": int(match.group(7))})
+                           "tcp_ms": int(match.group(6)), "tcp_ops": int(match.group(7)),
+                           "other_ms": int(match.group(8) or 0)})
         elif "[Boundary] TXCFG" in text:
             tx_start = t
         elif "[Boundary] TXDONE" in text and tx_start is not None:
@@ -229,7 +230,7 @@ def print_summary(summary):
         print(f"loss bursts ({len(bursts)}):")
         for burst in bursts[:40]:
             causes = ", ".join(
-                f"stall {s['ms']}ms (tx {s['lora_tx_ms']}/flash {s['flash_ms']}/tcp {s['tcp_ms']})"
+                f"stall {s['ms']}ms (tx {s['lora_tx_ms']}/flash {s['flash_ms']}/tcp {s['tcp_ms']}/other {s['other_ms']})"
                 for s in burst["stalls"]) or "no stall"
             print(f"  +{burst['at']}s lost {burst['lost']}: {causes}; "
                   f"lora_tx {burst['lora_tx']}; slow_flash {burst['slow_flash']}")
@@ -284,8 +285,10 @@ def main():
 
     ping.send_signal(signal.SIGINT)
     ping.wait(timeout=10)
+    ping_capture.join(timeout=10)  # ping block-buffers into the pipe; read to EOF first
     if flood_capture:
         flood_capture.process.wait(timeout=30)
+        flood_capture.join(timeout=10)
     time.sleep(1)
     capture.stop.set()
     capture.join(timeout=5)
