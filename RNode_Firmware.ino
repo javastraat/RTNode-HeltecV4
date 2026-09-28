@@ -36,6 +36,7 @@
 #include "TcpInterface.h"
 #include "FirewallConfig.h"
 #include "Advertise.h"
+#include "BleSpike.h"
 #include "MdnsService.h"
 #include "esp_bt.h"
 #endif
@@ -834,9 +835,10 @@ void setup() {
         esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
       #endif
     #else
-      #ifdef FIREWALL_MODE
+      #if defined(FIREWALL_MODE) && !defined(RTNODE_BLE_SPIKE)
         // Even when BLE/BT are compile-time disabled (e.g. V3 boundary),
         // the ESP32 BT controller is still loaded. Release its ~70KB of RAM.
+        // (The Bluetooth spike build keeps it: BleSpike.h.)
         btStop();
         esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
         Serial.write("[Boundary] Released BT controller memory\r\n");
@@ -1250,6 +1252,9 @@ void setup() {
       // announcer is a no-op until the user has enabled "Advertise Device"
       // in the captive-portal configuration.
       advertise_init();
+#ifdef RTNODE_BLE_SPIKE
+      ble_spike::init();
+#endif
 #endif
 
       HEAD("RNS is READY!", RNS::LOG_TRACE);
@@ -2915,6 +2920,9 @@ void loop() {
   if (reticulum) {
     advertise_loop();
   }
+#ifdef RTNODE_BLE_SPIKE
+  ble_spike::loop();
+#endif
 #endif
 
 #ifdef FIREWALL_MODE
