@@ -327,6 +327,37 @@ workblock, so it costs one 64-byte block; the search runs 2 ms per loop
 pass. Value-16 stamps took 0.8 s and 1.5 s with no stall. The NVS stamp
 cache records the value, so a stamp cached at 14 is not reused.
 
+**Bluetooth interface, first cut (2026-09-28).** RTNode speaks
+ble-reticulum's protocol v2.2 as Columba 2.2.6 does (ble-reticulum 07d9413):
+a GATT peripheral with RX, TX and identity characteristics, a central's
+first 16-byte write as its identity, 5-byte fragment headers, 0x00
+keepalives. It advertises v0.3.0's peripheral-only flag (manufacturer data
+`ff ff 03 01`, the same field Prns uses), so centrals connect to us and
+RTNode has no client code. Columba decides direction by MAC, and Android
+gives apps `02:00:00:00:00:00` as their own, so a phone always connects.
+Four fixed slots, each a Reticulum interface registered at boot and
+**trusted local exactly like LoRa** (James); when a peer leaves, the paths,
+links and reverse entries through its slot are forgotten
+(`Transport::forget_interface_routes`). Costs 38 KB internal RAM and 23 KB
+PSRAM at start.
+
+- *Tests.* `tests/bench_ble.py --serve` gains a relay mode (a v2.2 central
+  bridging packets to UDP, run from Terminal), and `tests/bench_ble_rns.py`
+  runs Reticulum through it: announces both ways and a Link with 10 echoes
+  of 431-byte packets, PASS unfragmented, with the peer fragmenting at 95
+  bytes, and with both sides fragmenting at 100 (`RTNODE_BLE_CHUNK_MAX`).
+  `tests/bench_ble_columba.py` finds a real Columba phone through the node
+  and sends it an LXMF message: PASS, path in 1.24 s, delivered.
+- *Android shows one link twice.* When Columba connects, Android also
+  reports the link to Columba's own GATT server; Columba's deduplication
+  keeps the client side and cancels the phantom server side, and the link
+  survives.
+- *Found: forwarded path requests were never answered.* A path request
+  for an unknown destination was forwarded but the asker was not recorded,
+  so the response went nowhere until the asker asked again. Now answered on
+  the asker's interface as Python does (b0c7a86); this also fixes TCP
+  clients asking for LoRa-only or backbone destinations.
+
 **Fix direction** (each measured on its own, rule 1)
 
 - Event-driven LoRa TX: route TxDone to DIO1, send one packet per TxDone
@@ -490,7 +521,10 @@ reference (Prns has not tested its R8 support on hardware either).
    is reserved at start, so it is in the figures. Not yet measured: four live
    peers, 2M PHY, L2CAP.
 7. **Bluetooth native GATT** → **Columba characteristics** → **L2CAP**, each
-   through scenario F.
+   through scenario F. **Columba first** (2026-09-28, the peer on the bench):
+   `BleInterface.h`, env `rtnode_heltec_v4_bench_bleif`. See "Bluetooth
+   interface, first cut" below. Prns-native and L2CAP still to do; the
+   interface is bench-only until a portal setting turns it on at boot.
 
 Each step's results go in the log below before the next step starts.
 
@@ -530,3 +564,5 @@ Each step's results go in the log below before the next step starts.
 | 2026-09-28 | + host memory in PSRAM (e52aa4c) | V4.2 + Mac peer | B flood 5/s, echo ~19/s × 180 B | 138 KB | ≤ 5 ms / 517 ms | 0 % / 149 ms | 0 | NimBLE start −38.2 KB internal, −16.4 KB PSRAM; 2619/2619 echoed, RTT p95 151 ms |
 | 2026-09-28 | same, Prns scan (200 ms / 1 s) | V4.2 + Mac peer | B flood 5/s, echo ~17.5/s × 180 B | 138 KB | ≤ 5 ms / 585 ms | 0 % / 146 ms | 0 | 2453/2453 echoed, RTT p95 346 ms, max 613 ms |
 | 2026-09-28 | + WiFi power-save probe | V4.2 | boot | — | — | — | — | power save off with Bluetooth on: ESP-IDF aborts, boot loop |
+| 2026-09-28 | Bluetooth interface (a4be90c…819784b) | V4.2 + Mac relay | `bench_ble_rns.py` | — | — | — | — | PASS: announces both ways ~1 s; Link 0.3 s; 10/10 echoes, RTT p50 149 ms (one fragment), 373 ms (peer fragments at 95 B), 421 ms (both at 100 B) |
+| 2026-09-28 | same | V4.2 + Galaxy S23, Columba 2.2.6 | `bench_ble_columba.py` | 137 KB | ≤ 1 ms / 576 ms | — | 0 | PASS: path 1.24 s (never answered before b0c7a86), LXMF delivered; proof back over Bluetooth 126 ms after the message crossed; two peers at once, no drops or bad fragments |
