@@ -19,15 +19,20 @@
 
 #include <Arduino.h>
 #include <esp_heap_caps.h>
+#include <esp_wifi.h>
 // Config.h defines MTU (508), which NimBLE's headers use as a parameter name.
 #pragma push_macro("MTU")
 #undef MTU
 #include <NimBLEDevice.h>
 #pragma pop_macro("MTU")
 
-// Scan duty cycle in percent of SCAN_INTERVAL_MS; 0 = no scanning.
+// Scan duty cycle in percent of RTNODE_BLE_SCAN_INTERVAL_MS; 0 = no scanning.
+// Prns's ESP32-S3 idle scan is 200 ms in every 1000.
 #ifndef RTNODE_BLE_SCAN_PERCENT
 #define RTNODE_BLE_SCAN_PERCENT 10
+#endif
+#ifndef RTNODE_BLE_SCAN_INTERVAL_MS
+#define RTNODE_BLE_SCAN_INTERVAL_MS 500
 #endif
 
 namespace ble_spike {
@@ -40,7 +45,7 @@ static const char* COLUMBA_ID_UUID = "37145b00-442d-4a94-917f-8f42c5da28e6";
 static const char* CONTROL_UUID    = "37145b00-442d-4a94-917f-8f42c5da28e7";
 static const char* DATA_UUID       = "37145b00-442d-4a94-917f-8f42c5da28e8";
 
-static const uint16_t SCAN_INTERVAL_MS  = 500;
+static const uint16_t SCAN_INTERVAL_MS  = RTNODE_BLE_SCAN_INTERVAL_MS;
 static const uint16_t ADV_INTERVAL_MIN  = 160;   // 100 ms, in 0.625 ms units
 static const uint16_t ADV_INTERVAL_MAX  = 240;   // 150 ms
 static const size_t   FRAME_MAX         = 512;
@@ -158,15 +163,27 @@ inline void init() {
     size_t internal_after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     size_t psram_after    = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     Serial.printf("[BLE] init: internal %u -> %u (%+d), largest %u; psram %u -> %u (%+d); "
-                  "max connections %d, scan %d%%, address %s\r\n",
+                  "max connections %d, scan %d%% of %u ms, address %s\r\n",
                   (unsigned)internal_before, (unsigned)internal_after,
                   (int)internal_after - (int)internal_before,
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                   (unsigned)psram_before, (unsigned)psram_after,
                   (int)psram_after - (int)psram_before,
-                  CONFIG_BT_NIMBLE_MAX_CONNECTIONS, RTNODE_BLE_SCAN_PERCENT,
+                  CONFIG_BT_NIMBLE_MAX_CONNECTIONS, RTNODE_BLE_SCAN_PERCENT, (unsigned)SCAN_INTERVAL_MS,
                   NimBLEDevice::getAddress().toString().c_str());
     last_report_ms = millis();
+
+#ifdef RTNODE_BLE_PS_PROBE
+    // PERFORMANCE_STRATEGY.md asks whether WiFi can leave modem sleep with
+    // Bluetooth on (ESP-IDF's coexistence guidance says it must not).
+    wifi_ps_type_t ps_before = WIFI_PS_MIN_MODEM, ps_after = WIFI_PS_MIN_MODEM;
+    esp_wifi_get_ps(&ps_before);
+    esp_err_t set_none = esp_wifi_set_ps(WIFI_PS_NONE);
+    esp_wifi_get_ps(&ps_after);
+    Serial.printf("[BLE] WiFi power save %d; setting none returned %s; now %d\r\n",
+                  (int)ps_before, esp_err_to_name(set_none), (int)ps_after);
+    esp_wifi_set_ps(ps_before);
+#endif
 }
 
 inline void loop() {
