@@ -107,6 +107,14 @@ public:
   // Poll for deferred DIO0 interrupt (call from main loop)
   void pollDio0();
 
+#if defined(FIREWALL_MODE)
+  // Event-driven TX: startTransmit() puts the written frame on air and
+  // returns at once; pollDio0() sees the TxDone interrupt, and takeTxDone()
+  // reports it once. Firewall builds route TxDone to DIO1 for this.
+  int startTransmit();
+  bool takeTxDone();
+#endif
+
 private:  uint8_t readRegister(uint16_t address);
   void writeRegister(uint16_t address, uint8_t value);
   uint8_t singleTransfer(uint8_t opcode, uint16_t address, uint8_t value);
@@ -142,6 +150,9 @@ private:
   uint8_t _packet[255];
   bool _preinit_done;
   volatile bool _dio0_risen;
+#if defined(FIREWALL_MODE)
+  bool _tx_done;
+#endif
   void (*_onReceive)(int);
 };
 

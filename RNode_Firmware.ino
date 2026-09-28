@@ -1817,6 +1817,92 @@ void transmit(uint16_t size) {
   } else { kiss_indicate_error(ERROR_TXFAILED); led_indicate_error(5); }
 }
 
+#ifdef FIREWALL_MODE
+// ── Event-driven LoRa TX (PERFORMANCE_STRATEGY.md, #43) ─────────────────────
+// transmit() above waits out each frame's airtime and flush_queue() sends the
+// whole queue back to back, so loop() stood still for up to a minute and the
+// task watchdog fired. Here one queued packet is started at a time; loop()
+// carries on, and the SX1262's TxDone interrupt (seen in pollDio0()) finishes
+// the frame. CSMA runs again before every packet.
+struct LoraTxJob {
+  bool     active;
+  uint8_t  header;
+  uint16_t size;          // payload bytes in tbuf
+  uint16_t sent;          // payload bytes already handed to the radio
+  uint16_t frame_bytes;   // bytes in the frame on air, for add_airtime()
+  uint32_t started_ms;
+};
+LoraTxJob lora_tx_job = {};
+
+bool lora_tx_busy() { return lora_tx_job.active; }
+
+// Writes the next frame (header plus up to 254 payload bytes, as transmit()
+// splits) and puts it on air.
+void lora_tx_start_frame() {
+  res::Timed res_lora_tx(res::LORA_TX);
+  uint16_t chunk = lora_tx_job.size - lora_tx_job.sent;
+  if (chunk > SINGLE_MTU - HEADER_L) { chunk = SINGLE_MTU - HEADER_L; }
+  LoRa->beginPacket();
+  LoRa->write(lora_tx_job.header);
+  LoRa->write(&tbuf[lora_tx_job.sent], chunk);
+  lora_tx_job.sent += chunk;
+  lora_tx_job.frame_bytes = chunk + HEADER_L;
+  lora_tx_job.started_ms = millis();
+  LoRa->startTransmit();
+}
+
+// Pops one packet off the queue into tbuf and starts sending it.
+void lora_tx_start_queued() {
+  if (fifo16_isempty(&packet_starts)) { return; }
+  uint16_t start = fifo16_pop(&packet_starts);
+  uint16_t length = fifo16_pop(&packet_lengths);
+  queue_height -= 1;
+  queued_bytes -= length;
+  if (length < MIN_L || length > MTU || !radio_online) { return; }
+
+  for (uint16_t i = 0; i < length; i++) {
+    tbuf[i] = packet_queue[(start + i) % CONFIG_QUEUE_SIZE];
+  }
+  VERBOSEF("[LoRa] TXSTART %u bytes", length);
+  lora_tx_job.active = true;
+  lora_tx_job.header = random(256) & 0xF0;
+  if (length > SINGLE_MTU - HEADER_L) { lora_tx_job.header |= FLAG_SPLIT; }
+  lora_tx_job.size = length;
+  lora_tx_job.sent = 0;
+  led_tx_on();
+  lora_tx_start_frame();
+}
+
+// Called from loop() after pollDio0(): finishes a frame on TxDone.
+void lora_tx_service() {
+  if (!lora_tx_job.active) { return; }
+  if (LoRa->takeTxDone()) {
+    add_airtime(lora_tx_job.frame_bytes);
+    if (lora_tx_job.sent < lora_tx_job.size) {
+      lora_tx_start_frame();   // second half of a split packet, as transmit() does
+      return;
+    }
+    lora_tx_job.active = false;
+    lora_receive();
+    led_tx_off();
+    update_airtime();
+    #if HAS_DISPLAY
+      display_tx = true;
+    #endif
+    return;
+  }
+  // A frame that has not finished long after its airtime means the modem is
+  // gone — the same fault endPacket() reports after LORA_MODEM_TIMEOUT_MS.
+  if (millis() - lora_tx_job.started_ms > LORA_MODEM_TIMEOUT_MS) {
+    lora_tx_job.active = false;
+    kiss_indicate_error(ERROR_MODEM_TIMEOUT);
+    kiss_indicate_error(ERROR_TXFAILED);
+    led_indicate_error(5);
+    hard_reset();
+  }
+}
+#endif
+
 void serial_callback(uint8_t sbyte) {
   if (IN_FRAME && sbyte == FEND && command == CMD_DATA) {
     IN_FRAME = false;
@@ -2501,6 +2587,11 @@ void update_modem_status() {
 }
 
 void check_modem_status() {
+  #ifdef FIREWALL_MODE
+    // While our own frame is on air the RSSI and carrier readings are of
+    // that frame, and would poison the noise floor and channel statistics.
+    if (lora_tx_busy()) { return; }
+  #endif
   if (millis()-last_status_update >= status_interval_ms) {
     update_modem_status();
     update_noise_floor();
@@ -2742,6 +2833,9 @@ void validate_status() {
 
 static uint32_t _tx_blocked_last_log = 0;
 void tx_queue_handler() {
+  #ifdef FIREWALL_MODE
+    if (lora_tx_busy()) { return; }  // one frame on air at a time; TxDone ends it
+  #endif
   if (!airtime_lock && queue_height > 0) {
     if (csma_cw == -1) {
       csma_cw = random(cw_min, cw_max);
@@ -2770,8 +2864,12 @@ void tx_queue_handler() {
             cw_wait_passed += millis()-cw_wait_start; cw_wait_start   = millis();
             if (cw_wait_passed < cw_wait_target) { return; }                      // Contention window wait time has not yet passed, continue waiting
             else {                                                                // Wait time has passed, flush the queue
+              #ifdef FIREWALL_MODE
+                lora_tx_start_queued();  // one packet; CSMA runs again for the next
+              #else
               bool should_flush = !lora_limit_rate && !lora_guard_rate;
               if (should_flush) { flush_queue(); } else { pop_queue(); }
+              #endif
               cw_wait_passed = 0; csma_cw = -1; difs_wait_start = -1; }
           }
         }
@@ -2966,6 +3064,9 @@ void loop() {
   if (radio_online) {
     // Poll for deferred DIO0 interrupt (SPI work moved out of ISR)
     LoRa->pollDio0();
+    #ifdef FIREWALL_MODE
+      lora_tx_service();
+    #endif
 
     #if MCU_VARIANT == MCU_ESP32
       modem_packet_t *modem_packet = NULL;

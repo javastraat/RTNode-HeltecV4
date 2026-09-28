@@ -131,6 +131,9 @@ sx126x::sx126x() :
   _packet({0}),
   _preinit_done(false),
   _dio0_risen(false),
+#if defined(FIREWALL_MODE)
+  _tx_done(false),
+#endif
   _onReceive(NULL)
 { setTimeout(0); }
 
@@ -446,6 +449,26 @@ int sx126x::beginPacket(int implicitHeader) {
   return 1;
 }
 
+#if defined(FIREWALL_MODE)
+int sx126x::startTransmit() {
+  setPacketParams(_preambleLength, _implicitHeaderMode, _payloadLength, _crcMode);
+  Serial.printf("[Boundary] TXCFG f=%lu sf=%u bw=%u cr=%u ldro=%u pre=%lu hdr=%u len=%u crc=%u iq=0 txp=%d\r\n",
+    (unsigned long)_frequency, (unsigned)_sf, (unsigned)_bw, (unsigned)_cr,
+    (unsigned)_ldro, (unsigned long)_preambleLength, (unsigned)_implicitHeaderMode,
+    (unsigned)_payloadLength, (unsigned)_crcMode, (int)_txp);
+  _tx_done = false;
+  uint8_t timeout[3] = {0}; // Single TX; completion arrives as TxDone on DIO1
+  executeOpcode(OP_TX_6X, timeout, 3);
+  return 1;
+}
+
+bool sx126x::takeTxDone() {
+  if (!_tx_done) { return false; }
+  _tx_done = false;
+  return true;
+}
+#endif
+
 int sx126x::endPacket() {
   setPacketParams(_preambleLength, _implicitHeaderMode, _payloadLength, _crcMode);
   #if defined(FIREWALL_MODE)
@@ -649,7 +672,11 @@ void sx126x::onReceive(void(*callback)(int)){
     buf[0] = 0xFF;  // Set irq masks, enable all
     buf[1] = 0xFF;
     buf[2] = 0x00;  // Set dio0 masks
-    buf[3] = IRQ_RX_DONE_MASK_6X; 
+    #if defined(FIREWALL_MODE)
+      buf[3] = IRQ_RX_DONE_MASK_6X | IRQ_TX_DONE_MASK_6X; // TxDone drives event-driven TX
+    #else
+      buf[3] = IRQ_RX_DONE_MASK_6X; 
+    #endif
     buf[4] = 0x00;  // Set dio1 masks
     buf[5] = 0x00;
     buf[6] = 0x00;  // Set dio2 masks 
@@ -893,6 +920,27 @@ void sx126x::pollDio0() {
   buf[1] = 0x00;
   executeOpcodeRead(OP_GET_IRQ_STATUS_6X, buf, 2);
   executeOpcode(OP_CLEAR_IRQ_STATUS_6X, buf, 2);
+
+  #if defined(FIREWALL_MODE)
+    // DIO1 also rises on TxDone here, so tell the two apart.
+    if (buf[1] & IRQ_TX_DONE_MASK_6X) {
+      Serial.printf("[Boundary] TXDONE irq=%02x%02x timeout=0 pa=%u\r\n", buf[0], buf[1],
+        #if HAS_LORA_PA
+          (unsigned)lora_pa_model
+        #else
+          0u
+        #endif
+      );
+      #if HAS_LORA_PA
+        if (lora_pa_model == LORA_PA_KCT8103L) {
+          // As in endPacket(): return the FEM to RX-LNA mode straight after TX.
+          digitalWrite(LORA_PA_CTX, LOW);
+        }
+      #endif
+      _tx_done = true;
+    }
+    if ((buf[1] & IRQ_RX_DONE_MASK_6X) == 0) { return; }
+  #endif
 
   if ((buf[1] & IRQ_PAYLOAD_CRC_ERROR_MASK_6X) == 0) {
     _packetIndex = 0;

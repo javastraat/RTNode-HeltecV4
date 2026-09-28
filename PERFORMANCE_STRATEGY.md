@@ -381,3 +381,4 @@ Each step's results go in the log below before the next step starts.
 | 2026-09-27 | v1.0.50 + inst (60b1aad) | V4.2 | A idle 10 min | 198 KB | ≤ 1 ms / 212 ms | 0 % / 182 ms | 0 | modem-sleep RTT; display ~6 pushes/s |
 | 2026-09-27 | v1.0.50 + inst (60b1aad) | V4.2 | B flood 1/s 5 min | 3.5 KB | ≤ 5 ms / 58.5 s | 73 % / — | 1 | WiFi wedged from +82 s until reboot; 20 LoRa queue drops |
 | 2026-09-27 | + PSRAM heap (072c873) | V4.2 | B flood 1/s 5 min | 191 KB | ≤ 5 ms / 58.9 s | 4.1 % / 209 ms | 1 | WiFi healthy; PSRAM 2.06→1.69 MB free; **task-watchdog reboot at +282 s** (LoRa flush > 60 s); 40 queue drops |
+| 2026-09-27 | + event-driven LoRa TX | V4.2 | B flood 1/s 5 min | 191 KB | ≤ 1 ms / 17.4 s | 1.5 % / 186 ms | 0 | LoRa TX blocks loop 10–16 ms/min (was up to 85 s); no reboot; stalls now the once-a-minute cache cleanup: 69–90 deletes + ~8 s unattributed each; 300 cache writes, 208 deletes in 5 min; 354 queue drops (flood ≫ SF10 capacity) |
