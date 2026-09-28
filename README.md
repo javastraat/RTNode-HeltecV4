@@ -249,24 +249,35 @@ The 128×64 OLED is split into two panels:
 
 ## Interface Modes
 
-The firmware runs up to **three RNS interfaces** simultaneously, using different interface modes to control announce propagation and routing behavior:
+Every interface runs in `MODE_FULL`; what separates the two sides is the
+firewall ([CORE_PRINCIPLES.md](CORE_PRINCIPLES.md),
+[FIREWALL_ADDRESSES.md](FIREWALL_ADDRESSES.md)):
 
-### LoRa Interface — `MODE_GATEWAY`
+- **LAN** — LoRa, the optional local TCP server and Bluetooth peers. Trusted:
+  their traffic passes freely across every interface, and every address it
+  mentions is whitelisted so the replies can come back.
+- **WAN** — the TCP backbone connections. Every packet is checked at
+  reception, before it touches any table: it passes only if it carries a
+  whitelisted address, belongs to a link in the link table, or is a proof
+  for a packet this node forwarded. Unsolicited backbone announces never
+  reach the LAN.
 
-Always uses `MODE_GATEWAY`. Announce broadcasts propagate freely in both directions, allowing the relay to forward announces between LoRa nodes and ensuring Transport's own path-probe packets are transmitted.
+[CONTRACT_TESTS.md](CONTRACT_TESTS.md) tests both sides on the bench.
 
-### TCP Backbone Interface — `MODE_BOUNDARY`
+### LoRa Interface
 
-The TCP backbone connection uses `MODE_BOUNDARY` (`0x20`), a custom transport mode adapted for the memory-constrained ESP32 environment. In this mode:
-- Incoming announces from the backbone are received and cached, but **not stored in the path table by default** — only stored when specifically requested via a path request from a local LoRa node
-- This prevents the path table (limited to **24 entries** on ESP32) from being overwhelmed by thousands of backbone destinations
-- When the path table needs to be culled, **backbone-learned paths are evicted first**, preserving locally-needed LoRa paths
+Announces are forwarded in both directions, and Transport's own path-probe
+packets are transmitted.
 
-Only registered when WiFi is enabled and `tcp_mode == 1` (client mode).
+### TCP Backbone Interface
 
-### Optional Local TCP Server — `MODE_GATEWAY`
+Filtered at reception as above, so thousands of backbone destinations never
+reach the path table. Only registered when WiFi is enabled and a backbone
+is configured.
 
-When both WiFi and the local TCP server are enabled, a TCP server on the WiFi network allows local Reticulum nodes to connect. It uses `MODE_GATEWAY`, so announces are forwarded freely to and from local TCP clients (matching standard Reticulum transport node behaviour). Also registered as a local-client interface so Transport forwards announces, link packets, and proofs to connected clients.
+### Optional Local TCP Server
+
+When both WiFi and the local TCP server are enabled, a TCP server on the WiFi network allows local Reticulum nodes to connect. Announces are forwarded freely to and from local TCP clients (matching standard Reticulum transport node behaviour). Also registered as a local-client interface so Transport forwards announces, link packets, and proofs to connected clients.
 
 Local TCP clients should be endpoint clients, not transport routers. If an application such as Meshchat is configured with Reticulum transport mode enabled, it can relay WAN-scale traffic into RTNode through the LAN side, even when RTNode's own WAN/backbone interface is disabled. That defeats the boundary model and can fill routing/cache state from the trusted side. Disable transport mode on Meshchat/Reticulum clients connected to the Local TCP Server unless you are intentionally testing bounded LAN-side transport behavior.
 
@@ -283,8 +294,8 @@ The ESP32-S3 has limited RAM compared to a desktop Reticulum node. Several custo
 
 | Table | Default (Desktop) | RTNode-HeltecV4 | Rationale |
 |-------|-------------------|-----------|-----------|
-| Path table (`_destination_table`) | Unbounded | **24 entries** | Prevents unbounded growth; backbone-learned paths evicted first |
-| Hash list (`_hashlist`) | 1,000,000 | **32** | Packet dedup list; small is fine for low-throughput LoRa |
+| Path table (`_destination_table`) | Unbounded | **24 entries**; **256** with the Reticulum heap in PSRAM (V4) | Prevents unbounded growth; the least recently heard or used path is evicted first |
+| Hash list (`_hashlist`) | 1,000,000 | **100** | Packet dedup list; small is fine for low-throughput LoRa |
 | Path request tags (`_max_pr_tags`) | 32,000 | **32** | Pending path requests rarely exceed a few dozen |
 | Known destinations | 100 | **24** | Identity cache; rarely need more on a transport node |
 | Max queued announces | 16 | **4** | Outbound announce queue; LoRa is slow, no point queuing many |

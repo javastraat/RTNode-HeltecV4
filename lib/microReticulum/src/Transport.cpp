@@ -1748,23 +1748,32 @@ static uint32_t ingress_dropped = 0;
 
 			if (is_backbone) {
 				// === BACKBONE PACKET ===
-				// Proofs are responses to traffic we already forwarded.
-				// They carry no source/destination identity — just a
-				// packet body hash.  Exempt from whitelist; the reverse
-				// table handles routing, and forged proofs fail signature
-				// validation downstream.
-				if (packet.packet_type() == Type::Packet::PROOF) {
-					WLOG(packet, "TO: " + short_hash(packet.destination_hash()) + " (" + dest_zone(packet.destination_hash()) + ") - WL-PASS PROOF exempt hops=" + std::to_string(packet.hops()) + " sz=" + std::to_string(packet.raw().size()));
-					// Fall through to reverse-table routing below
+				// Proofs answer traffic this node forwarded or sent: a link
+				// in the link table (any_known covers those), a packet in
+				// the reverse table, or one of our own receipts. Any other
+				// WAN proof is dropped here like any other packet. (They
+				// used to be exempt: an unrelated proof reached transport
+				// processing and the packet hashlist, and its destination
+				// was added to WL#2, so a WAN peer could churn the
+				// whitelist with junk proofs.)
+				bool answers_us = false;
+				if (packet.packet_type() == Type::Packet::PROOF && !any_known) {
+					answers_us = flatmap_find(_reverse_table, packet.destination_hash()) != _reverse_table.end()
+					    || std::any_of(_receipts.begin(), _receipts.end(), [&](const PacketReceipt& r) {
+						       return r.truncated_hash() == packet.destination_hash(); });
 				}
-				// Only allowed if at least one address in the packet is
-				// already whitelisted (WL#1 or WL#2). No other gates.
-				else if (!any_known) {
+				// Otherwise only allowed if at least one address in the
+				// packet is already whitelisted (WL#1 or WL#2) or is an
+				// active link. No other gates.
+				if (!any_known && !answers_us) {
 					WLOG(packet, "TO: " + short_hash(packet.destination_hash()) + " (" + dest_zone(packet.destination_hash()) + ") - WL-BLOCK hops=" + std::to_string(packet.hops()) + " sz=" + std::to_string(packet.raw().size()));
 					return;
 				}
-				// Transitive: add all addresses to WL#2
-				for (auto& a : addrs) { wl_add(a, "backbone"); }
+				// Transitive: add all addresses to WL#2 (a proof names only
+				// what is known already)
+				if (packet.packet_type() != Type::Packet::PROOF) {
+					for (auto& a : addrs) { wl_add(a, "backbone"); }
+				}
 				WLOG(packet, "TO: " + short_hash(packet.destination_hash()) + " (" + dest_zone(packet.destination_hash()) + ") - WL-PASS hops=" + std::to_string(packet.hops()) + " sz=" + std::to_string(packet.raw().size()));
 			}
 			else if (is_trusted_local) {

@@ -53,6 +53,10 @@ Delivery confirmation or link request proof (LRPROOF).
 | `packet.destination_hash()` | For LRPROOF: the `link_id` from the original LINKREQUEST. For regular proofs: the destination hash. | ✅ | ✅ |
 | `packet.transport_id()` | Relay transport instance (HEADER_2 only) | ❌ | ✅ |
 
+A proof from the backbone seeds nothing, and passes only when it answers
+this node's traffic: a link id in the link table, a packet hash in the
+reverse table, or one of the node's own receipts.
+
 ---
 
 ## How a path request is identified
@@ -105,12 +109,26 @@ Addresses matching `_control_hashes` (path.request, tunnel.synthesize) are **nev
 For every packet:
   1. Extract Tier 1 addresses (seed + check)
   2. Extract Tier 2 addresses (check only)
-  3. any_known = any Tier 1 or Tier 2 address is in WL#1 or WL#2
+  3. any_known = any Tier 1 or Tier 2 address is in WL#1 or WL#2,
+                 or is a link id in the link table
   
   If backbone:
+    PROOF answering us (destination in the reverse table, or one of our
+      own receipts) → PASS, seed nothing
     any_known == false → BLOCK
     any_known == true  → PASS, seed Tier 1 addresses into WL#2
+                         (a PROOF seeds nothing: it names only what is known)
   
-  If local (LoRa):
+  If local (LoRa, local TCP server, Bluetooth):
     Always PASS, seed Tier 1 addresses into WL#2
 ```
+
+## Keeping what is in use
+
+Each whitelist holds 200 addresses and is culled from the front. Every hit
+(a check that finds the address, or a seed of one already there) moves the
+address to the back, so an address still in use is never the one culled.
+Link ids are also known through the link table, which a link enters only
+when its request passed this filter and leaves when it goes stale — so a
+link keeps working however many new addresses the LAN mentions meanwhile
+(`wan-link-survives-churn` in [CONTRACT_TESTS.md](CONTRACT_TESTS.md)).
