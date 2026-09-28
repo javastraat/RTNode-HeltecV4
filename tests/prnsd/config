@@ -10,12 +10,17 @@
   loglevel = 5
 
 [interfaces]
+  # mode = gateway on both: a transport node forwards requests for unknown
+  # paths only from gateway-mode interfaces (RNS DISCOVER_PATHS_FOR), and the
+  # contract tests find never-announced destinations through this prnsd.
   [[Nearby Prns peers]]
     type = PrnsBluetoothAuto
     enabled = Yes
+    mode = gateway
 
   [[Bench test port]]
     type = TCPServerInterface
     enabled = Yes
     listen_ip = 127.0.0.1
     listen_port = 4270
+    mode = gateway
