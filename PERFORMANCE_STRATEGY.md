@@ -413,18 +413,30 @@ reference (Prns has not tested its R8 support on hardware either).
 
 - **RAM decided at boot.** Firewall builds release the Bluetooth controller's
   memory at startup, and that cannot be undone without a reboot, so Bluetooth
-  is a boot-time setting. The controller plus a NimBLE host costs internal
-  SRAM that has to be measured on a V4 before any protocol work (the spike in
-  step 6).
+  is a boot-time setting. **Measured (spike, 2026-09-28, NimBLE-Arduino 1.4.3,
+  four connection slots, host memory in PSRAM):** about 65 KB of internal
+  RAM. 22 KB is a larger static image (IRAM +14.8 KB, DRAM +7.5 KB) plus the
+  controller memory no longer released; NimBLE's start takes 38.2 KB more
+  (16.4 KB goes to PSRAM). With the host in internal RAM instead, start costs
+  49.0 KB. Under scenario B with one busy connection, internal free stays at
+  ~143 KB (low 138 KB, largest block 127 KB) against the 48 KB floor.
+  Image +194 KB.
 - **One radio.** Bluetooth advertising, scanning and connection events take
   time from WiFi. Scan duty trades directly against #43-style WiFi loss, so
   scenario F measures WiFi health with Bluetooth on. Prns's ESP32-S3 values
   (idle scan 200 ms per 1 s; discovery backs off while links are busy) are the
-  starting point.
+  starting point. **Measured:** with a 5/s LAN flood and one peer echoing
+  180-byte frames at up to 19/s, WiFi lost no pings in four runs and its p95
+  stayed at 146–166 ms (plain build 166 ms); the worst ping rose from 291 ms
+  to 240–600 ms. Scan duty cost the Bluetooth link instead: echo p95 151 ms
+  at 10 % (50 ms per 500 ms), 346 ms at Prns's 20 %. So scan little, and less
+  while links are busy, as Prns does.
 - **WiFi power save.** ESP-IDF's coexistence guidance expects WiFi modem sleep
-  while Bluetooth is enabled, so `WiFi.setSleep(false)` — the #43 reporter's
-  partial workaround — may not be available with Bluetooth on. Verify in the
-  spike.
+  while Bluetooth is enabled. **Verified, and it is fatal:** turning power
+  save off (`WiFi.setSleep(false)`, the #43 reporter's partial workaround)
+  with Bluetooth on logs "Should enable WiFi modem sleep when both WiFi and
+  Bluetooth are enabled" and aborts, every boot. RTNode never turns it off
+  today; any future option that does must be refused while Bluetooth is on.
 - **Four fixed peer slots**, each its own interface, registered at boot.
   Reassembly buffers and queues are allocated once.
 - **Access control is IFAC.** Neither the Prns-native nor the Columba protocol
@@ -471,7 +483,12 @@ reference (Prns has not tested its R8 support on hardware either).
    it, fixed on `fix/advert-stamp-nonblocking`: see "Device advertisement
    stamp" below.
 6. **Bluetooth spike.** NimBLE on a V4, advertising, scanning and holding four
-   connections, under scenario B. Record heap and WiFi-health cost.
+   connections, under scenario B. Record heap and WiFi-health cost. **Done**
+   (2026-09-28) with one peer, as James asked: `BleSpike.h`, env
+   `rtnode_heltec_v4_bench_ble`, `tests/bench_ble.py`. Costs are in
+   "Bluetooth LE: its share of the budget"; the memory for four connections
+   is reserved at start, so it is in the figures. Not yet measured: four live
+   peers, 2M PHY, L2CAP.
 7. **Bluetooth native GATT** → **Columba characteristics** → **L2CAP**, each
    through scenario F.
 
@@ -506,3 +523,10 @@ Each step's results go in the log below before the next step starts.
 | 2026-09-27 | 1.5.2 ingress rules (d0d15cf) | V4.2 | B flood 10/s 150 s | 197 KB | ≤ 5 ms / 401 ms | 0 % / 157 ms | 0 | path test PASS 0.43 s; ic_held=256 ic_drop=1226 |
 | 2026-09-28 | + publish_ifac opt-in (77f3492) | V4.2 | advert test, `tests/bench_advert_ifac.py` | — | — | — | — | PASS both ways: saved setting unset → no credentials; opted in → name and passphrase. Stamp at value 14 blocked `loop()` 28.0 s and 12.7 s; one came out at 14, ignored by a default 1.5.2 node |
 | 2026-09-28 | + sliced value-16 stamp (f4569b3) | V4.2 | advert test | — | — | — | — | PASS both ways as a default 1.5.2 listener; stamps of value 18 in 0.8 s and 1.5 s (15,466 and 30,460 attempts), no `[STALL]` |
+| 2026-09-28 | BLE spike (2e6aea2), host in internal RAM | V4.2 | B flood 5/s, advertising + 10 % scan, no peer | 127 KB | ≤ 5 ms / 298 ms | 1/737 / 149 ms | 0 | NimBLE start −49.0 KB internal; internal free 132 KB |
+| 2026-09-28 | same | V4.2 + Mac peer | B flood 5/s, connected, no traffic | 127 KB | ≤ 5 ms / 468 ms | 0 % / 153 ms | 0 | MTU 517 |
+| 2026-09-28 | same | V4.2 + Mac peer | B flood 5/s, echo 5/s × 180 B | 127 KB | ≤ 5 ms / 339 ms | 0 % / 166 ms | 0 | 700/700 echoed, RTT p50 63–77, p95 131 ms |
+| 2026-09-28 | same | V4.2 + Mac peer | B flood 5/s, echo ~19/s × 180 B | 127 KB | ≤ 5 ms / 563 ms | 0 % / 148 ms | 0 | 2626/2626 echoed, RTT p95 181 ms; no echo drops, no notify failures |
+| 2026-09-28 | + host memory in PSRAM (e52aa4c) | V4.2 + Mac peer | B flood 5/s, echo ~19/s × 180 B | 138 KB | ≤ 5 ms / 517 ms | 0 % / 149 ms | 0 | NimBLE start −38.2 KB internal, −16.4 KB PSRAM; 2619/2619 echoed, RTT p95 151 ms |
+| 2026-09-28 | same, Prns scan (200 ms / 1 s) | V4.2 + Mac peer | B flood 5/s, echo ~17.5/s × 180 B | 138 KB | ≤ 5 ms / 585 ms | 0 % / 146 ms | 0 | 2453/2453 echoed, RTT p95 346 ms, max 613 ms |
+| 2026-09-28 | + WiFi power-save probe | V4.2 | boot | — | — | — | — | power save off with Bluetooth on: ESP-IDF aborts, boot loop |
