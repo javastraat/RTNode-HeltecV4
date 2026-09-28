@@ -20,7 +20,7 @@
 //
 //  Each peer holds one of BLE_SLOTS fixed slots, and each slot is its own
 //  Reticulum interface, registered at boot and online while its peer is
-//  identified. When a peer leaves, the paths, links and reverse entries
+//  identified. The slots are trusted local interfaces, exactly like LoRa. When a peer leaves, the paths, links and reverse entries
 //  through its slot are forgotten, so the slot's next peer never receives
 //  them.
 //
@@ -253,6 +253,8 @@ inline void register_interfaces() {
         slot_interfaces.emplace_back(slots[i]);
         slot_interfaces[i].mode(RNS::Type::Interface::MODE_FULL);
         RNS::Transport::register_interface(slot_interfaces[i]);
+        // Trusted and local, exactly like LoRa (James, 2026-09-28).
+        RNS::Transport::register_local_client_interface(slot_interfaces[i]);
     }
 }
 
