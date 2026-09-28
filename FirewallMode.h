@@ -185,6 +185,7 @@ struct FirewallState {
     // Runtime state
     bool     wifi_connected;
     bool     ap_tcp_connected;    // Local TCP server (LAN) has client
+    uint8_t  ble_peers;           // Bluetooth peers connected (runtime, for the display)
     bool     ap_active;
     uint32_t packets_bridged_lora_to_tcp;
     uint32_t packets_bridged_tcp_to_lora;

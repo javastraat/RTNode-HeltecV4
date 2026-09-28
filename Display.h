@@ -777,8 +777,8 @@ bool stat_area_intialised = false;
 void draw_stat_area() {
   if (device_init_done) {
 #ifdef FIREWALL_MODE
-    // ── Firewall Mode: 4 status indicators + battery ──
-    //  LORA / WIFI / WAN (backbone) / LAN (local TCP)
+    // ── Firewall Mode: status indicators + battery ──
+    //  LORA and BLE / WIFI / WAN (backbone) / LAN (local TCP)
     stat_area.fillRect(0, 0, 64, 64, SSD1306_BLACK);
     stat_area.setFont(SMALL_FONT);
     stat_area.setTextColor(SSD1306_WHITE);
@@ -789,6 +789,17 @@ void draw_stat_area() {
     stat_area.drawCircle(4, 4, 3, SSD1306_WHITE);
     stat_area.setCursor(10, 6);
     stat_area.print(radio_online ? "LORA" : "lora");
+
+#ifdef RTNODE_BLE
+    // Row 1, second column — BLE: filled with a peer connected, hollow while
+    // waiting for one, hidden when Bluetooth is off (like LAN)
+    if (firewall_state.ble_enabled) {
+      stat_area.fillCircle(40, 4, 3, firewall_state.ble_peers > 0 ? SSD1306_WHITE : SSD1306_BLACK);
+      stat_area.drawCircle(40, 4, 3, SSD1306_WHITE);
+      stat_area.setCursor(46, 6);
+      stat_area.print(firewall_state.ble_peers > 0 ? "BLE" : "ble");
+    }
+#endif
 
     // Row 2 — WIFI
     if (!firewall_state.wifi_enabled) {

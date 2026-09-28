@@ -620,6 +620,15 @@ static void report() {
     }
 }
 
+// Peers connected and identified right now (the display's Bluetooth bubble).
+inline uint8_t connected_peers() {
+    uint8_t n = 0;
+    for (int i = 0; i < SLOTS; i++) {
+        if (slots[i] && slots[i]->used && slots[i]->identified) n++;
+    }
+    return n;
+}
+
 inline void loop() {
     if (!started) return;
 

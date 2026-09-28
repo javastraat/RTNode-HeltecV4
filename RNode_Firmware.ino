@@ -2948,6 +2948,8 @@ void loop() {
     res::Timed res_ble(res::BLE);
     ble::loop();
   }
+  // For the display; Bluetooth runs with WiFi off too (LoRa-only repeater).
+  firewall_state.ble_peers = firewall_state.ble_enabled ? ble::connected_peers() : 0;
 #endif
 #endif
 
