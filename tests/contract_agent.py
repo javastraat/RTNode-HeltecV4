@@ -17,9 +17,10 @@ SHA-256.
 
 Commands: announce; path {dest, timeout}; link {dest, aspects, timeout};
 echo {dest, n, size, timeout}; resource {dest, size, timeout}; send {dest,
-aspects, n} (single packets, no link); close {dest}; quit.
+aspects, n} (single packets, no link); flood {rate, duration} (announces for
+fresh destinations); close {dest}; quit.
 Events: ready, heard (every announce heard), path, link, link_in, echo,
-resource, resource_in, packet_in, error.
+resource, resource_in, packet_in, flood, error.
 """
 import argparse
 import hashlib
@@ -210,6 +211,20 @@ def main():
                     receipt.set_delivery_callback(lambda r: proved.append(r))
             time.sleep(command.get("wait", 10))
             emit(event="send", dest=command["dest"], n=command.get("n", 1), proved=len(proved))
+        elif cmd == "flood":
+            # Announces for fresh destinations, one each, at a steady rate.
+            rate, duration = float(command.get("rate", 20)), float(command.get("duration", 60))
+            hashes, start, n = [], time.time(), 0
+            while time.time() - start < duration:
+                due = start + n / rate
+                if due > time.time():
+                    time.sleep(due - time.time())
+                d = RNS.Destination(RNS.Identity(), RNS.Destination.IN, RNS.Destination.SINGLE, APP,
+                                    "flood", args.name, str(n))
+                d.announce()
+                hashes.append(d.hash.hex())
+                n += 1
+            emit(event="flood", n=n, s=round(time.time() - start, 2), hashes=hashes)
         elif cmd == "close":
             link = links_out.pop(command["dest"], None)
             if link:
