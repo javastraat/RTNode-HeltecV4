@@ -78,6 +78,7 @@ namespace RNS {
 		void jobs();
 		void should_persist_data();
 		void persist_data();
+		void persist_time_offset();
 		void clean_caches();
 		void clear_caches();
 		//void __create_default_config();
@@ -167,6 +168,8 @@ namespace RNS {
 			bool _is_connected_to_shared_instance = false;
 			bool _is_standalone_instance = false;
 			double _last_data_persist = Utilities::OS::time();
+			bool _persisted_once = false;     // first save waits FIRST_PERSIST_DELAY
+			double _last_time_persist = Utilities::OS::time();
 			double _last_cache_clean = 0.0;
 
 			// CBA

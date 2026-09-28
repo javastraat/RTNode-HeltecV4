@@ -419,6 +419,7 @@ namespace RNS {
 		static void write_tunnel_table();
 		static void persist_data();
 		static void clean_caches();
+		static void clean_cache_files();   // flash side of the announce cache
 		static void release_held_announces();
 		static size_t ingress_held_count();
 		static uint32_t ingress_dropped_count();

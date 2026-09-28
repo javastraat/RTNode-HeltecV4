@@ -95,6 +95,7 @@ Reticulum::Reticulum() : _object(new Object()) {
 
 	// Initialize time-based variables *after* time offset update
 	_object->_last_data_persist = OS::time();
+	_object->_last_time_persist = OS::time();
 	_object->_last_cache_clean = 0.0;
 	_object->_jobs_last_run = OS::time();
 
@@ -186,10 +187,13 @@ void Reticulum::jobs() {
 		_object->_last_cache_clean = OS::time();
 	}
 
-	if (now > _object->_last_data_persist + PERSIST_INTERVAL) {
+	if (now > _object->_last_data_persist + (_object->_persisted_once ? PERSIST_INTERVAL : FIRST_PERSIST_DELAY)) {
 		uint32_t start = micros();
 		persist_data();
 		persist_us = micros() - start;
+	}
+	else if (now > _object->_last_time_persist + TIME_PERSIST_INTERVAL) {
+		persist_time_offset();
 	}
 	if (clean_us >= 50000 || persist_us >= 50000) {
 		Serial.printf("[RJOBS] t=%lu clean=%lums persist=%lums\r\n", (unsigned long)millis(),
@@ -218,7 +222,13 @@ void Reticulum::persist_data() {
 	TRACE("Persisting transport and identity data...");
 	Transport::persist_data();
 	Identity::persist_data();
+	persist_time_offset();
 
+	_object->_last_data_persist = OS::time();
+	_object->_persisted_once = true;
+}
+
+void Reticulum::persist_time_offset() {
 #ifdef ARDUINO
 #if defined(RNS_USE_FS)
 	// write time offset to file
@@ -235,8 +245,7 @@ void Reticulum::persist_data() {
 	}
 #endif
 #endif
-
-	_object->_last_data_persist = OS::time();
+	_object->_last_time_persist = OS::time();
 }
 
 void Reticulum::clean_caches() {

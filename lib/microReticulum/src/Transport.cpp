@@ -387,7 +387,7 @@ static inline bool is_resource_ctx(uint8_t ctx) {
 		read_path_table();
 		DEBUG("Writing path table and cleaning caches to clean-up any orphaned paths/files");
 		write_path_table();
-		clean_caches();
+		clean_cache_files();
 
 		read_tunnel_table();
 
@@ -4258,6 +4258,7 @@ TRACE("Transport::write_path_table: buffer size " + std::to_string(Persistence::
 	TRACE("Transport::persist_data()");
 	write_packet_hashlist();
 	write_path_table();
+	clean_cache_files();
 	write_tunnel_table();
 }
 
@@ -4265,6 +4266,15 @@ TRACE("Transport::write_path_table: buffer size " + std::to_string(Persistence::
 	TRACE("Transport::clean_caches()");
 #if defined(RNS_USE_FS) && defined(RNS_PERSIST_PATHS)
 	prune_announce_cache();
+#endif
+}
+
+// Cached announces on flash belong to the persisted paths, and change only
+// when write_path_table() runs, so the stale ones go straight after it (this
+// listed the flash directory every minute before).
+/*static*/ void Transport::clean_cache_files() {
+	TRACE("Transport::clean_cache_files()");
+#if defined(RNS_USE_FS) && defined(RNS_PERSIST_PATHS)
 	// CBA Remove cached packets no longer in path list
 	std::list<std::string> files = OS::list_directory(Reticulum::_cachepath);
     for (auto& file : files) {

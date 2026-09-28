@@ -113,7 +113,19 @@ namespace RNS { namespace Type {
 		//static const uint16_t PERSIST_INTERVAL = 60*60*12;
 		// CBA TEST
 		//static const uint16_t PERSIST_INTERVAL = 60*60;
-		static const uint16_t PERSIST_INTERVAL = 60;
+		//static const uint16_t PERSIST_INTERVAL = 60;
+		// RTNode runs for months, and every save to flash stalls both cores
+		// (0.3-1.2 s on the V4, once a minute until 2026-09-28). Paths, known
+		// identities and the packet hashlist are saved an hour after start and
+		// then daily; a power cut costs at most a day of learning, rebuilt from
+		// announces and path requests.
+		static const uint32_t FIRST_PERSIST_DELAY = 60*60;
+		static const uint32_t PERSIST_INTERVAL = 60*60*24;
+		// The clock offset alone (8 bytes) hourly: the node has no NTP or RTC,
+		// its clock carries across reboots only through this file, and its
+		// own announces are stamped with it - peers ignore an announce older
+		// than the last they heard, so a power cut must not set it back long.
+		static const uint32_t TIME_PERSIST_INTERVAL = 60*60;
 		static const uint16_t GRACIOUS_PERSIST_INTERVAL = 60*5;
 
 		static const uint8_t DESTINATION_LENGTH = TRUNCATED_HASHLENGTH/8;	// In bytes
