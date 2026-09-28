@@ -580,6 +580,19 @@ static void config_send_html() {
               "random offset of approximately half a kilometre (about half a mile) for "
               "privacy. The exact stored coordinates are not changed.</p>");
 
+    html += F("<label>Publish Network Access (IFAC)</label>"
+              "<select name='advert_ifac'>");
+    html += F("<option value='0'");
+    if (!firewall_state.advert_publish_ifac) html += F(" selected");
+    html += F(">No</option>");
+    html += F("<option value='1'");
+    if (firewall_state.advert_publish_ifac) html += F(" selected");
+    html += F(">Yes: include network name and passphrase</option>");
+    html += F("</select>");
+    html += F("<p class='note'>Adds the IFAC network name and passphrase to the advertisement, "
+              "so anyone who receives it can join the LoRa network. Leave this off unless "
+              "the network is meant to be open.</p>");
+
     // ── Options Section ──
     html += F(
         "<h2>&#x2699; Options</h2>"
@@ -769,6 +782,7 @@ static void config_handle_save() {
     }
 
     firewall_state.advert_jitter = (config_server->arg("advert_jitter").toInt() == 1);
+    firewall_state.advert_publish_ifac = (config_server->arg("advert_ifac").toInt() == 1);
 
     // ── Node name ──
     String node_name_arg = config_server->arg("node_name");

@@ -106,13 +106,14 @@
 #define ADDR_CONF_MDNS_EN       0x151 // mDNS enable flag (1 byte; 0x73 = enabled, 0xFF = unset/default-enabled)
 #define ADDR_CONF_MDNS_NAME     0x152 // Custom mDNS hostname (33 bytes, null-terminated; empty = auto)
 #define ADDR_CONF_PROBE_EN      0x23C // rnprobe responder enable (1 byte; 0x73 = enabled, 0xFF = unset/disabled)
+#define ADDR_CONF_ADVERT_IFAC   0x23D // Publish IFAC name + passphrase in adverts (1 byte; 0x73 = yes, 0xFF = unset = no)
 // Extra backbone slots 1-3 (slot 0 remains in the legacy BTCP/BHOST/BHPORT
 // fields for backward compatibility with existing devices).
 #define ADDR_CONF_BSLOT_BASE    0x173
 #define ADDR_CONF_BSLOT_EN(slot)   (ADDR_CONF_BSLOT_BASE + ((slot) - 1) * FIREWALL_BACKBONE_SLOT_BYTES)
 #define ADDR_CONF_BSLOT_HOST(slot) (ADDR_CONF_BSLOT_EN(slot) + 1)
 #define ADDR_CONF_BSLOT_PORT(slot) (ADDR_CONF_BSLOT_HOST(slot) + FIREWALL_BACKBONE_HOST_LEN)
-// Total: 0x23C (572 bytes — still within the extended CONFIG area used on ESP32)
+// Total: 0x23D (573 bytes — still within the extended CONFIG area used on ESP32)
 
 #define FIREWALL_ENABLE_BYTE 0x73
 #define FIREWALL_APP_MARKER0 0x52
@@ -152,6 +153,9 @@ struct FirewallState {
     double   advert_lat;      // Latitude in decimal degrees (-90..90)
     double   advert_lon;      // Longitude in decimal degrees (-180..180)
     bool     advert_jitter;   // Randomize ~0.5 km offset for advertised coords
+    // Include the IFAC network name and passphrase in adverts, so anyone who
+    // receives one can join — RNS's publish_ifac, off by default.
+    bool     advert_publish_ifac;
     char     node_name[33];   // Human-readable name (empty = auto from node hash)
 
     // Airtime / duty-cycle limits, in fraction (0.0 = disabled, 0.01 = 1%).
@@ -282,6 +286,7 @@ inline void firewall_load_config() {
         firewall_state.advert_lat = 0.0;
         firewall_state.advert_lon = 0.0;
         firewall_state.advert_jitter = false;
+        firewall_state.advert_publish_ifac = false;
         firewall_state.node_name[0] = '\0';
         firewall_state.st_airtime_limit = 0.0f;
         firewall_state.lt_airtime_limit = 0.0f;
@@ -402,6 +407,10 @@ inline void firewall_load_config() {
         uint8_t advert_jitter_byte = EEPROM.read(config_addr(ADDR_CONF_ADVERT_JITTER));
         firewall_state.advert_jitter = (advert_jitter_byte == FIREWALL_ENABLE_BYTE);
 
+        // Unset (0xFF, every save before this setting existed) = do not publish.
+        uint8_t advert_ifac_byte = EEPROM.read(config_addr(ADDR_CONF_ADVERT_IFAC));
+        firewall_state.advert_publish_ifac = (advert_ifac_byte == FIREWALL_ENABLE_BYTE);
+
         for (int i = 0; i < 32; i++) {
             firewall_state.node_name[i] = EEPROM.read(config_addr(ADDR_CONF_NODE_NAME + i));
             if (firewall_state.node_name[i] == (char)0xFF) firewall_state.node_name[i] = '\0';
@@ -514,6 +523,8 @@ inline void firewall_save_config() {
     firewall_write_double(ADDR_CONF_ADVERT_LON, firewall_state.advert_lon);
     EEPROM.write(config_addr(ADDR_CONF_ADVERT_JITTER),
                  firewall_state.advert_jitter ? FIREWALL_ENABLE_BYTE : 0x00);
+    EEPROM.write(config_addr(ADDR_CONF_ADVERT_IFAC),
+                 firewall_state.advert_publish_ifac ? FIREWALL_ENABLE_BYTE : 0x00);
     for (int i = 0; i < 32; i++) {
         EEPROM.write(config_addr(ADDR_CONF_NODE_NAME + i), firewall_state.node_name[i]);
     }
