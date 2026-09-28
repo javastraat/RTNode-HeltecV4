@@ -4387,28 +4387,27 @@ TRACE("Transport::write_path_table: buffer size " + std::to_string(Persistence::
 		_destination_table.erase(dest_hash);
 	}
 
-	// Pass 2: If still over maxsize, evict destinations with the lowest-score best path
+	// Pass 2: If still over maxsize, evict the destinations heard or used
+	// least recently (an entry's timestamp is refreshed when it forwards).
+	// Evicting by score (bitrate over hops) always took LoRa destinations
+	// first, then multi-hop WAN ones, however busy they were.
 	if (_destination_table.size() > _path_table_maxsize) {
-		// Build sorted list: (dest_hash, best_score) ascending
-		std::vector<std::pair<Bytes, double>> scored;
+		// Build sorted list: (dest_hash, last heard or used) ascending
+		std::vector<std::pair<Bytes, double>> by_age;
 		for (auto& [dest_hash, deque] : _destination_table) {
-			double best_score = -1.0;
+			double last = 0;
 			for (const auto& entry : deque) {
-				if (entry.is_expired(now)) continue;
-				Interface iface = find_interface_from_hash(entry.receiving_interface);
-				double s = entry.score(iface ? iface.bitrate() : 0);
-				if (s > best_score) best_score = s;
+				if (entry.timestamp > last) last = entry.timestamp;
 			}
-			if (best_score < 0) best_score = 0; // all expired, score 0
-			scored.push_back({dest_hash, best_score});
+			by_age.push_back({dest_hash, last});
 		}
-		std::sort(scored.begin(), scored.end(),
+		std::sort(by_age.begin(), by_age.end(),
 			[](const std::pair<Bytes, double>& a, const std::pair<Bytes, double>& b) { return a.second < b.second; });
 
 		uint16_t count = 0;
-		for (const auto& [dest_hash, score] : scored) {
+		for (const auto& [dest_hash, last] : by_age) {
 			if (_destination_table.size() <= _path_table_maxsize) break;
-			TRACE("Transport::cull_path_table: Removing destination " + dest_hash.toHex() + " from path table (score=" + std::to_string(score) + ")");
+			TRACE("Transport::cull_path_table: Removing destination " + dest_hash.toHex() + " from path table (last used " + std::to_string(now - last) + " s ago)");
 			_destination_table.erase(dest_hash);
 			++count;
 		}

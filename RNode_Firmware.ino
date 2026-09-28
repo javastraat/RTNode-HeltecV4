@@ -1015,7 +1015,10 @@ void setup() {
       HEAD("Firewall Mode: Initializing...", RNS::LOG_TRACE);
 
       // ESP32 has only ~324KB heap. Each path entry costs ~80 bytes.
-      RNS::Transport::path_table_maxsize(24);
+      // With Reticulum's heap in PSRAM (V4) there is room for a LAN's worth:
+      // at 24, a burst of new announces evicted paths still in use, and
+      // links to them failed.
+      RNS::Transport::path_table_maxsize(RNS::Utilities::OS::heap_in_psram() ? 256 : 24);
       RNS::Transport::path_table_maxpersist(12);
       boundary_nominal_path_table_maxsize = RNS::Transport::path_table_maxsize();
       boundary_nominal_path_table_maxpersist = RNS::Transport::probe_destination_enabled();
