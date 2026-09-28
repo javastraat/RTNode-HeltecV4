@@ -371,6 +371,25 @@ static void config_send_html() {
     html += String(firewall_state.mdns_hostname);
     html += F("'>");
 
+#ifdef RTNODE_BLE
+    // ── Bluetooth Section ── (with the other interfaces; on by default)
+    html += F(
+        "<h2>&#x1f4f1; Bluetooth</h2>"
+        "<p class='note'>Lets phones running Columba, and Prns nodes, connect over Bluetooth and "
+        "join the local network alongside LoRa and WiFi clients, up to four at a time. "
+        "On by default. Takes effect after a restart; uses about 70 KB of memory while on.</p>"
+        "<label>Bluetooth Peers</label>"
+        "<select name='ble_en'>"
+    );
+    html += F("<option value='1'");
+    if (firewall_state.ble_enabled) html += F(" selected");
+    html += F(">Enabled</option>");
+    html += F("<option value='0'");
+    if (!firewall_state.ble_enabled) html += F(" selected");
+    html += F(">Disabled</option>");
+    html += F("</select>");
+#endif
+
     // ── Diagnostics / rnprobe Section ──
     html += F(
         "<h2>&#x1f50d; Diagnostics (rnprobe)</h2>"
@@ -519,23 +538,6 @@ static void config_send_html() {
     html += F("<input name='ifac_pass' type='password' maxlength='32' placeholder='Shared secret' value='");
     html += String(firewall_state.ifac_passphrase);
     html += F("'>");
-
-    // ── Bluetooth Section ──
-    html += F(
-        "<h2>&#x1f4f1; Bluetooth</h2>"
-        "<p class='note'>Lets phones running Columba, and Prns nodes, connect over Bluetooth and "
-        "join the local network alongside LoRa and WiFi clients, up to four at a time. "
-        "Takes effect after a restart; uses about 70 KB of memory while on.</p>"
-        "<label>Bluetooth Peers</label>"
-        "<select name='ble_en'>"
-    );
-    html += F("<option value='1'");
-    if (firewall_state.ble_enabled) html += F(" selected");
-    html += F(">Enabled</option>");
-    html += F("<option value='0'");
-    if (!firewall_state.ble_enabled) html += F(" selected");
-    html += F(">Disabled</option>");
-    html += F("</select>");
 
     // ── Device Advertisement Section ──
     html += F(
@@ -800,7 +802,11 @@ static void config_handle_save() {
 
     firewall_state.advert_jitter = (config_server->arg("advert_jitter").toInt() == 1);
     firewall_state.advert_publish_ifac = (config_server->arg("advert_ifac").toInt() == 1);
-    firewall_state.ble_enabled = (config_server->arg("ble_en").toInt() != 0);
+    // Only where the form has the setting (builds with Bluetooth), so a save
+    // elsewhere leaves it as it was
+    if (config_server->hasArg("ble_en")) {
+        firewall_state.ble_enabled = (config_server->arg("ble_en").toInt() != 0);
+    }
 
     // ── Node name ──
     String node_name_arg = config_server->arg("node_name");
