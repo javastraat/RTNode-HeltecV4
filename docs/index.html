@@ -215,6 +215,17 @@
     .version-row select:focus { outline: none; border-color: var(--accent); }
     .version-row select:disabled { opacity: 0.5; cursor: not-allowed; }
 
+    /* ── V4 R8 opt-in (shown when an 8 MB PSRAM V4 is detected) ── */
+    .r8-row {
+      border: 1px solid var(--warn);
+      border-radius: 6px;
+      padding: 0.6rem 0.75rem;
+      margin-bottom: 1.1rem;
+      font-size: 0.85rem;
+    }
+    .r8-row label { cursor: pointer; }
+    .r8-row p { color: var(--muted); margin-top: 0.4rem; font-size: 0.8rem; }
+
     /* ── Flash section ──────────────────────────────────── */
     .flash-box {
       background: var(--surface);
@@ -329,6 +340,13 @@
         </select>
       </div>
 
+      <!-- V4 R8 opt-in: shown only when Detect finds a V4 with 8 MB PSRAM -->
+      <div id="r8-row" class="r8-row" style="display:none">
+        <label><input type="checkbox" id="r8-check"> Use the <strong>experimental R8 build</strong> for this board's 8&nbsp;MB PSRAM</label>
+        <p>The standard V4 build also runs on an R8, but without its PSRAM (so without Bluetooth), and probably with a blank screen.
+          The R8 build uses the PSRAM and the R8's pins; it has not yet been run on an R8. If it misbehaves, flash the standard build again.</p>
+      </div>
+
       <!-- Mode toggle -->
       <div class="mode-toggle">
         <button class="mode-btn active" id="mode-update">
@@ -414,9 +432,17 @@
   const REPO = 'jrl290/RTNode-HeltecV4';
   const FIRMWARE = {
     v4: {
-      label:      'Heltec V4 (PSRAM, QIO)',
+      label:      'Heltec V4 (V4.2 / V4.3)',
       updateName: 'rtnode_heltec_v4.bin',
       fullName:   'rtnode_heltec_v4_merged.bin',
+      updateAddr: 0x10000,
+      fullAddr:   0x0,
+    },
+    // V4 R8 (ESP32-S3R8, 8 MB octal PSRAM): experimental, chosen by hand only.
+    v4r8: {
+      label:      'Heltec V4 R8 (8 MB PSRAM, experimental build)',
+      updateName: 'rtnode_heltec_v4_r8.bin',
+      fullName:   'rtnode_heltec_v4_r8_merged.bin',
       updateAddr: 0x10000,
       fullAddr:   0x0,
     },
@@ -499,6 +525,13 @@
     return 'v3';
   }
 
+  // A V4 R8 reports "Embedded PSRAM 8MB"; the standard V4 build stays the
+  // default for it, and the R8 build is an opt-in.
+  function hasPsram8(chipName, features) {
+    return chipName.includes('ESP32-S3') &&
+      features.some(f => String(f).toUpperCase().includes('PSRAM 8MB'));
+  }
+
   // ── UI refs ────────────────────────────────────────────────────────────────
   const detectBtn    = document.getElementById('detect-btn');
   const flashBtn     = document.getElementById('flash-btn');
@@ -512,11 +545,14 @@
   const progressFill = document.getElementById('progress-fill');
   const progressPct  = document.getElementById('progress-pct');
   const logArea      = document.getElementById('log-area');
+  const r8Row        = document.getElementById('r8-row');
+  const r8Check      = document.getElementById('r8-check');
 
   let currentIsUpdate = true;
   let transport  = null;
   let loader     = null;
   let detectedFw = null;
+  let detectedR8 = false;
 
   const UPDATE_DESC = 'Writes only the application region (0x10000). ' +
     'Bootloader, partition table, and all saved settings (LoRa config, identity, WiFi) are left untouched.';
@@ -558,6 +594,7 @@
   async function doDisconnect() {
     if (transport) { try { await transport.disconnect(); } catch (_) {} transport = null; }
     loader = null; detectedFw = null;
+    detectedR8 = false; r8Check.checked = false; r8Row.style.display = 'none';
   }
 
   // ── Step 1: Detect ─────────────────────────────────────────────────────────
@@ -588,6 +625,9 @@
       const flashSize   = flashSizeKb >= 1024 ? (flashSizeKb / 1024) + 'MB' : flashSizeKb + 'KB';
       const boardKey    = detectBoard(chipName, features);
       detectedFw        = FIRMWARE[boardKey];
+      detectedR8        = boardKey === 'v4' && hasPsram8(chipName, features);
+      r8Check.checked   = false;
+      r8Row.style.display = detectedR8 ? 'block' : 'none';
 
       // Extra diagnostics — helpful when triaging boot-loop reports.
       // readFlashId() returns 24 bits: low byte = JEDEC manufacturer,
@@ -611,9 +651,10 @@
       log(`Features:   ${features.join(', ')}`);
       log(`Flash size: ${flashSize}`);
       log(`Flash ID:   ${flashIdHex}`);
-      log(`Board:      ${detectedFw.label}`);
+      log(`Board:      ${detectedFw.label}${detectedR8 ? ' — V4 R8 (8 MB PSRAM)' : ''}`);
 
-      setBadge('ok', `&#10003; ${detectedFw.label} &mdash; Flash: ${flashSize} &mdash; Ready to flash`);
+      const boardText = detectedR8 ? `${detectedFw.label}, R8 (8&nbsp;MB PSRAM)` : detectedFw.label;
+      setBadge('ok', `&#10003; ${boardText} &mdash; Flash: ${flashSize} &mdash; Ready to flash`);
       flashBtn.disabled = false;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -639,7 +680,8 @@
     logArea.textContent = ''; logArea.style.display = 'block';
 
     try {
-      const fw     = detectedFw;
+      const fw     = (detectedR8 && r8Check.checked) ? FIRMWARE.v4r8 : detectedFw;
+      log(`Build:    ${fw.label}`);
       const ver    = versionSelect.value;
       const assetName = currentIsUpdate ? fw.updateName : fw.fullName;
       if (!assetAvailable(ver, assetName)) {

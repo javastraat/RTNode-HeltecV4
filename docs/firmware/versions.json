@@ -1,7 +1,7 @@
 [
   {
     "tag": "v1.0.51",
-    "name": "v1.0.51 \u2014 Bluetooth LE peers (Columba, Prns), ingress control, LoRa and firewall forwarding fixes",
+    "name": "v1.0.51 \u2014 Bluetooth LE peers (Columba, Prns), V4 R8 build (experimental), LoRa and firewall forwarding fixes",
     "stability": "beta",
     "prerelease": false,
     "published_at": "2026-09-28T00:00:00Z",
@@ -9,7 +9,9 @@
       "rtnode_heltec_v3.bin",
       "rtnode_heltec_v3_merged.bin",
       "rtnode_heltec_v4.bin",
-      "rtnode_heltec_v4_merged.bin"
+      "rtnode_heltec_v4_merged.bin",
+      "rtnode_heltec_v4_r8.bin",
+      "rtnode_heltec_v4_r8_merged.bin"
     ]
   },
   {

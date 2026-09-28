@@ -23,6 +23,9 @@ Usage:
     # Update firmware — V3
     python flash.py --board v3
 
+    # Update firmware — V4 R8 (8 MB octal PSRAM), experimental build
+    python flash.py --board v4-r8
+
     # Flash a specific Beta release version
     python flash.py --release v1.0.12
 
@@ -100,6 +103,23 @@ BOARD_PROFILES = {
                 "build_dir":    ".pio/build/rtnode_heltec_v4",
                 "firmware_bin": "rtnode_heltec_v4.bin",
                 "merged_bin":   "rtnode_heltec_v4_merged.bin",
+            },
+        },
+    },
+    # V4 R8 (ESP32-S3R8, 8 MB octal PSRAM): its own build, experimental (not
+    # yet run on an R8). Never chosen automatically: the standard V4 build
+    # also runs on an R8, without its PSRAM.
+    "v4-r8": {
+        "name":      "Heltec WiFi LoRa 32 V4 R8 (experimental)",
+        "chip":      "ESP32-S3",
+        "baud_rate": "921600",
+        "flash_mode": "dio",
+        "flash_variants": {
+            "16MB": {
+                "pio_env":      "rtnode_heltec_v4_r8",
+                "build_dir":    ".pio/build/rtnode_heltec_v4_r8",
+                "firmware_bin": "rtnode_heltec_v4_r8.bin",
+                "merged_bin":   "rtnode_heltec_v4_r8_merged.bin",
             },
         },
     },
@@ -183,8 +203,15 @@ def FIRMWARE_BIN():
     return os.path.join(BUILD_DIR(), flash_variant()["firmware_bin"])
 
 def FLASH_SIZE():
-    """Return the effective flash size: detected from device, or conservative default."""
-    return _detected_flash_size or DEFAULT_FLASH_SIZE
+    """Return the effective flash size: detected from the device, else the size
+    of the board's firmware variant (a V4 image is built for 16MB; merging it as
+    8MB, the old default, wrote an 8MB bootloader header over a 16MB layout)."""
+    if _detected_flash_size:
+        return _detected_flash_size
+    variants = board_profile()["flash_variants"]
+    if DEFAULT_FLASH_SIZE in variants:
+        return DEFAULT_FLASH_SIZE
+    return sorted(variants.keys(), key=lambda s: int(s.replace("MB", "")))[0]
 
 def BAUD_RATE():
     return board_profile()["baud_rate"]
@@ -391,6 +418,10 @@ def detect_board(port, esptool_cmd):
         # V3 (ESP32-S3FN8):   features has no PSRAM entry
         if "PSRAM" in features.upper():
             board_key = "v4"
+            if "PSRAM 8MB" in features.upper():
+                # V4 R8: the standard V4 build runs on it, without its PSRAM.
+                print("  This V4 has 8 MB octal PSRAM (V4 R8). The standard V4 build runs on it")
+                print("  without the PSRAM; the R8 build (experimental) uses it: --board v4-r8")
         else:
             board_key = "v3"
     elif "ESP32" in chip_str:
@@ -1232,6 +1263,8 @@ Examples:
       Prefer a host-installed esptool over the bundled Release copy.
   python flash.py --board v3
       Download latest firmware and flash a V3 board.
+  python flash.py --board v4-r8
+      Flash the experimental build for a V4 with 8 MB octal PSRAM (R8).
   python flash.py --release v1.0.12
       Flash a specific Beta release tag.
   python flash.py --full
@@ -1248,9 +1281,10 @@ Examples:
       Erase flash first, then do a full flash.
         """,
     )
-    parser.add_argument("--board", choices=["v3", "v4"], default=None,
-                        help="Target board: v3 (Heltec V3) or v4 (Heltec V4). "
-                             "Auto-detected from connected device if omitted.")
+    parser.add_argument("--board", choices=["v3", "v4", "v4-r8"], default=None,
+                        help="Target board: v3 (Heltec V3), v4 (Heltec V4: V4.2, V4.3) or "
+                             "v4-r8 (V4 with 8 MB octal PSRAM, experimental build). "
+                             "Auto-detected from connected device if omitted (never v4-r8).")
     parser.add_argument("--file", "-f", help="Path to firmware binary to flash")
     parser.add_argument("--port", "-p", help="Serial port (auto-detected if omitted)")
     parser.add_argument("--baud", "-b", default=None, help="Baud rate (board-specific default)")
