@@ -155,17 +155,25 @@ static std::vector<Bytes> _firewall_mentioned_addresses;
 static const uint16_t _firewall_maxsize = 200;
 
 // ── Whitelist helpers: enforce uniqueness on push (no per-node alloc) ──
+// The lists are culled from the front when over _firewall_maxsize, so every
+// hit moves an address to the back: what is still in use is never what goes.
+// (Oldest-added-first let 200 new LAN mentions evict the id of a link still
+// carrying traffic, and its WAN side was blocked from then on.)
+static bool wl_touch(std::vector<Bytes>& list, const Bytes& addr) {
+	auto it = std::find(list.begin(), list.end(), addr);
+	if (it == list.end()) return false;
+	std::rotate(it, it + 1, list.end());
+	return true;
+}
 static void wl1_push(const Bytes& addr) {
 	if (!addr) return;
-	if (std::find(_firewall_local_addresses.begin(), _firewall_local_addresses.end(), addr)
-	    == _firewall_local_addresses.end()) {
+	if (!wl_touch(_firewall_local_addresses, addr)) {
 		_firewall_local_addresses.push_back(addr);
 	}
 }
 static bool wl2_push(const Bytes& addr) {
 	if (!addr) return false;
-	if (std::find(_firewall_mentioned_addresses.begin(), _firewall_mentioned_addresses.end(), addr)
-	    == _firewall_mentioned_addresses.end()) {
+	if (!wl_touch(_firewall_mentioned_addresses, addr)) {
 		_firewall_mentioned_addresses.push_back(addr);
 		return true;
 	}
@@ -1669,9 +1677,13 @@ static uint32_t ingress_dropped = 0;
 					NOTICE("WL#2 ADD - " + addr.toHex().substr(0,8) + " (from " + zone_tag(strcmp(tag,"backbone")==0) + ")");
 				}
 			};
+			// A link in the link table passed this filter when it was
+			// requested, and leaves the table when it goes stale, so its
+			// id stays known however many addresses the LAN mentions since.
 			auto wl_known = [&](const Bytes& addr) -> bool {
-				return std::find(_firewall_local_addresses.begin(), _firewall_local_addresses.end(), addr) != _firewall_local_addresses.end()
-				    || std::find(_firewall_mentioned_addresses.begin(), _firewall_mentioned_addresses.end(), addr) != _firewall_mentioned_addresses.end();
+				return wl_touch(_firewall_local_addresses, addr)
+				    || wl_touch(_firewall_mentioned_addresses, addr)
+				    || _link_table.find(addr) != _link_table.end();
 			};
 
 			// Tier 1: user-facing addresses (seeded + checked)
