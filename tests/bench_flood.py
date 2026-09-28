@@ -4,10 +4,12 @@ the way a transport rnsd on the LAN side does in issue #43
 (PERFORMANCE_STRATEGY.md, scenario B). Run by bench_load.py; needs RNS, so use
 the workspace venv:
 
-    ../.venv/bin/python tests/bench_flood.py <host> <port> <per_second> <seconds> <config_dir>
+    ../.venv/bin/python tests/bench_flood.py <host> <port> <per_second> <seconds> <config_dir> [linger]
 
 Every line it prints starts with a Unix timestamp: announces sent, and the
-TCP interface going offline or online.
+TCP interface going offline or online. With linger, it then stays connected
+and silent for that many seconds (the node discards a client's held
+announces when it disconnects).
 """
 import os
 import sys
@@ -23,6 +25,7 @@ def event(text):
 def main():
     host, port = sys.argv[1], int(sys.argv[2])
     rate, seconds, config_dir = float(sys.argv[3]), float(sys.argv[4]), sys.argv[5]
+    linger = float(sys.argv[6]) if len(sys.argv) > 6 else 0.0
 
     os.makedirs(config_dir, exist_ok=True)
     with open(os.path.join(config_dir, "config"), "w") as config:
@@ -66,6 +69,9 @@ def main():
             next_announce += interval
         time.sleep(0.02)
     event(f"done announced={count}")
+    if linger > 0:
+        time.sleep(linger)
+        event("linger over")
     os._exit(0)  # skip RNS teardown; the harness only needs the log
 
 

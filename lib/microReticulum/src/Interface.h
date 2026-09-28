@@ -43,19 +43,22 @@ namespace RNS {
 		uint8_t hops = 0;
 	};
 
-	// Ingress control state (Python RNS Interface; Type::Interface IC_*). One
-	// per interface, or one per client on an interface that multiplexes
+	// Ingress control state (Python RNS 1.5.2 Interface; Type::Interface IC_*).
+	// One per interface, or one per client on an interface that multiplexes
 	// clients (TcpInterface) — where Python spawns an interface per client, so
 	// one flooding client does not get every other client's announces held.
+	// Times are Interface::ingress_clock() milliseconds.
 	struct IngressState {
+		IngressState();
 		int8_t client = -1;         // client slot, for logs; -1 for the interface itself
-		double created = 0;         // first announce seen; age decides the burst threshold
-		double ia_times[Type::Interface::IA_FREQ_SAMPLES] = {};
+		uint64_t created;           // age decides the burst threshold
+		uint32_t ia_times[Type::Interface::IA_FREQ_SAMPLES];  // announce arrivals, oldest at ia_head
+		uint8_t ia_head = 0;
 		uint8_t ia_count = 0;
-		uint8_t ia_next = 0;
 		bool burst_active = false;
-		double burst_activated = 0;
-		double held_release = 0;
+		uint64_t burst_activated = 0;
+		uint64_t burst_sustained = 0;
+		uint64_t held_release = 0;
 		std::vector<HeldAnnounce> held;
 	};
 
@@ -237,11 +240,16 @@ namespace RNS {
 		void received_announce();
 		bool should_ingress_limit();
 		// Replaces the announce held for the same destination, or adds one when
-		// may_add and the source is under its own limit. False: dropped.
+		// may_add and the source is under its own limit. False: dropped (also,
+		// as in Python, any announce PATHFINDER_M - 1 hops or more away).
 		bool hold_announce(const Bytes& destination_hash, const Bytes& raw, uint8_t hops, bool may_add);
-		// At most one held announce per calmed ingress state (Python's
-		// process_held_announces), for Transport to feed back through inbound().
-		void collect_released_announces(std::vector<Bytes>& out);
+		// Python's per-interface jobs, run every 5 s for each ingress state:
+		// should_ingress_limit(), then process_held_announces(). Released
+		// announces are appended for Transport to feed back through inbound().
+		void ingress_jobs(std::vector<Bytes>& released);
+		// Milliseconds since boot. OS::time() carries Reticulum's saved time
+		// offset, restored after interfaces register, so it jumps at boot.
+		static uint64_t ingress_clock();
 		size_t held_announce_count() const;
 		inline Type::Interface::modes mode() const { assert(_impl); return _impl->_mode; }
 		inline void mode(Type::Interface::modes mode) { assert(_impl); _impl->_mode = mode; }

@@ -420,22 +420,21 @@ static bool releasing_held_announce = false;
 static uint32_t ingress_dropped = 0;
 
 // Ingress control, as Python RNS's interface jobs: every INTERFACE_JOBS_INTERVAL
-// each interface may hand back one held announce, which goes through inbound()
-// again. Runs outside jobs(): outbound() waits while _jobs_running is set.
+// each ingress state may hand back one held announce, which goes through
+// inbound() again. Runs outside jobs(): outbound() waits while _jobs_running is set.
 /*static*/ void Transport::release_held_announces() {
-	static const double INTERFACE_JOBS_INTERVAL = 5.0;  // Python Transport.interface_jobs_interval
-	static double last_run = 0;
-	double now = OS::time();
-	if (now < last_run + INTERFACE_JOBS_INTERVAL) { return; }
-	last_run = now;
+	static const uint64_t INTERFACE_JOBS_INTERVAL = 5000;  // ms; Python Transport.interface_jobs_interval
+	static uint64_t last_run = 0;
+	if (Interface::ingress_clock() < last_run + INTERFACE_JOBS_INTERVAL) { return; }
 	std::vector<std::pair<Bytes, Interface>> releases;
 	for (auto& [hash, interface] : _interfaces) {
 		std::vector<Bytes> released;
-		interface.collect_released_announces(released);
+		interface.ingress_jobs(released);
 		for (auto& raw : released) {
 			releases.push_back({raw, interface});
 		}
 	}
+	last_run = Interface::ingress_clock();  // as Python: stamped after the jobs
 	for (auto& [raw, interface] : releases) {
 		VERBOSEF("[INGRESS] %s releasing a held announce (%u still held)", interface.toString().c_str(),
 		         (unsigned)interface.held_announce_count());
@@ -2371,22 +2370,29 @@ static uint32_t ingress_dropped = 0;
 			TRACE("Transport::inbound: Packet is ANNOUNCE");
 			DEBUG("DIAG: ANNOUNCE-IN dest=" + packet.destination_hash().toHex().substr(0,8) + " iface=" + packet.receiving_interface().toString() + " hops=" + std::to_string(packet.hops()));
 
-			// Ingress control (Python RNS Transport.inbound): an announce for a
-			// destination not yet in the path table is held while its interface
-			// is bursting; known destinations' re-announces are left to announce
-			// rate limiting. Python counts only announces whose signature checks
-			// out; this counts every one, since checking signatures is the work a
+			// Ingress control (Python RNS 1.5.2 Transport.preprocess_inbound): an
+			// announce for a destination not yet in the path table, and that no
+			// path request is waiting for, is held while its source is bursting;
+			// known destinations' re-announces are left to announce rate
+			// limiting. Python counts only announces whose signature checks out;
+			// this counts every one, since checking signatures is the work a
 			// flood makes an ESP32 do. raw_in is held as it arrived, IFAC and
 			// all, so a released announce is verified again.
 			if (interface && !releasing_held_announce) {
 				Interface receiving = interface;
 				receiving.received_announce();
-				if (_destination_table.find(packet.destination_hash()) == _destination_table.end()
+				const Bytes& announced = packet.destination_hash();
+				bool awaited =
+					std::any_of(_path_requests.begin(), _path_requests.end(),
+					            [&](const std::pair<Bytes, double>& request) { return request.first == announced; }) ||
+					std::any_of(_discovery_path_requests.begin(), _discovery_path_requests.end(),
+					            [&](const std::pair<Bytes, PathRequestEntry>& request) { return request.first == announced; });
+				if (_destination_table.find(announced) == _destination_table.end() && !awaited
 				    && receiving.should_ingress_limit()) {
 					size_t total_limit = OS::heap_in_psram() ? Type::Interface::MAX_HELD_ANNOUNCES_TOTAL
 					                                         : Type::Interface::MAX_HELD_ANNOUNCES_TOTAL_SMALL;
 					bool may_add = ingress_held_count() < total_limit;
-					if (!receiving.hold_announce(packet.destination_hash(), raw_in, packet.hops(), may_add)) {
+					if (!receiving.hold_announce(announced, raw_in, packet.hops(), may_add)) {
 						if (ingress_dropped++ == 0) {
 							NOTICEF("[INGRESS] %s: held announces full (%u held in total), dropping; counted as ic_drop",
 							        receiving.toString().c_str(), (unsigned)ingress_held_count());

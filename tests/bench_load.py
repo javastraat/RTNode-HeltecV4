@@ -135,6 +135,32 @@ def tcp_ready(host, port, timeout):
     return False
 
 
+def start_bench_node(serial_port, host, port, out, flood):
+    """Resets the node and captures its serial log into out/serial.log.
+    Before a flood, insists on the bench build's "backbones off" mark, so no
+    flood reaches a public backbone, and on the local TCP server answering."""
+    capture = SerialCapture(serial_port, os.path.join(out, "serial.log"))
+    reset_at = time.time()
+    capture.reset_node()
+    capture.start()
+    if not capture.wait_for("[RES] boot", reset_at, 30):
+        print("no boot mark after an RTS reset; trying esptool's watchdog reset", flush=True)
+        capture.stop.set()
+        capture.join(timeout=5)
+        capture = SerialCapture(serial_port, os.path.join(out, "serial.log"))
+        reset_at = time.time()
+        capture.watchdog_reset_node()
+        capture.start()
+        if not capture.wait_for("[RES] boot", reset_at, 60):
+            sys.exit("node did not print its [RES] boot mark — is the bench build flashed?")
+    if flood:
+        if not capture.wait_for("[BENCH] overrides: backbones off", reset_at, 5):
+            sys.exit("no 'backbones off' mark: refusing to flood a node that may be connected to a public backbone")
+        if not tcp_ready(host, port, 60):
+            sys.exit(f"local TCP server {host}:{port} not reachable")
+    return capture
+
+
 def percentile(values, fraction):
     if not values:
         return None
@@ -277,25 +303,7 @@ def main():
     out = args.out or os.path.join(HERE, "bench-results", time.strftime("%Y%m%d-%H%M%S") + f"-{args.scenario}")
     os.makedirs(out, exist_ok=True)
 
-    capture = SerialCapture(args.serial, os.path.join(out, "serial.log"))
-    reset_at = time.time()
-    capture.reset_node()
-    capture.start()
-    if not capture.wait_for("[RES] boot", reset_at, 30):
-        print("no boot mark after an RTS reset; trying esptool's watchdog reset", flush=True)
-        capture.stop.set()
-        capture.join(timeout=5)
-        capture = SerialCapture(args.serial, os.path.join(out, "serial.log"))
-        reset_at = time.time()
-        capture.watchdog_reset_node()
-        capture.start()
-        if not capture.wait_for("[RES] boot", reset_at, 60):
-            sys.exit("node did not print its [RES] boot mark — is the bench build flashed?")
-    if args.scenario == "lan-flood":
-        if not capture.wait_for("[BENCH] overrides: backbones off", reset_at, 5):
-            sys.exit("no 'backbones off' mark: refusing to flood a node that may be connected to a public backbone")
-        if not tcp_ready(args.host, args.port, 60):
-            sys.exit(f"local TCP server {args.host}:{args.port} not reachable")
+    capture = start_bench_node(args.serial, args.host, args.port, out, flood=args.scenario == "lan-flood")
     time.sleep(args.settle)
 
     ping = subprocess.Popen(["ping", "-i", str(PING_INTERVAL), args.host],
