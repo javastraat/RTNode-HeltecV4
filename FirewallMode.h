@@ -185,6 +185,7 @@ struct FirewallState {
     // Runtime state
     bool     wifi_connected;
     bool     ap_tcp_connected;    // Local TCP server (LAN) has client
+    bool     ble_running;         // Bluetooth up this boot (on, and PSRAM to run in)
     uint8_t  ble_peers;           // Bluetooth peers connected (runtime, for the display)
     bool     ap_active;
     uint32_t packets_bridged_lora_to_tcp;
@@ -268,6 +269,17 @@ inline bool firewall_read_double(int addr, double& out) {
 // bytes (every save before this setting existed) mean on.
 inline bool firewall_ble_enabled_in_eeprom() {
     return EEPROM.read(config_addr(ADDR_CONF_BLE_EN)) != 0x00;
+}
+
+// Bluetooth keeps its memory (NimBLE's host, the interface's queues) in PSRAM,
+// so it runs only where the board's PSRAM started. On a V4 with 8 MB octal
+// PSRAM (ESP32-S3R8) today's quad-PSRAM build starts none (issue #44), and
+// Bluetooth would fail its first allocation and restart the node every boot.
+inline bool firewall_ble_has_psram() {
+#ifdef RTNODE_BENCH_NO_PSRAM
+    return false;   // bench only: as a board whose PSRAM did not start
+#endif
+    return ESP.getPsramSize() > 0;
 }
 
 inline void firewall_load_config() {

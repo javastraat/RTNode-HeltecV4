@@ -423,7 +423,12 @@ reference (Prns has not tested its R8 support on hardware either).
   Vext is never switched on, so the OLED is probably dark.
 - **Today on an R8:** PSRAM init fails, the node runs with none (V3-like
   memory), and both flashers classify it as a V4 because the chip reports
-  "PSRAM".
+  "PSRAM". Bluetooth, on by default from v1.0.51, keeps its memory in PSRAM,
+  so it starts only where PSRAM did (`firewall_ble_has_psram()`); before
+  that check it would have failed its first allocation and restarted the
+  node every boot. `-DRTNODE_BENCH_NO_PSRAM=1` makes a bench build run as
+  an R8 does (Reticulum heap and Bluetooth off PSRAM): 2026-09-28, boots
+  clean with Bluetooth off, LAN contract checks 8/8, ~170 KB internal free.
 - **Two builds are required.** The prebuilt quad (`dio_qspi`) and octal
   (`dio_opi`) SDK variants link different PSRAM drivers. The bootloader and
   partition images are shared; only the app differs. A wrong build does not

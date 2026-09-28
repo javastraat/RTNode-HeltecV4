@@ -842,7 +842,10 @@ void setup() {
         // unless Bluetooth peers are on (BleInterface.h): released memory
         // cannot come back without a reboot.
         #if defined(RTNODE_BLE)
-        if (!firewall_ble_enabled_in_eeprom())
+        if (firewall_ble_enabled_in_eeprom() && !firewall_ble_has_psram()) {
+          Serial.write("[BLE] off: this board's PSRAM did not start, and Bluetooth keeps its memory there\r\n");
+        }
+        if (!firewall_ble_enabled_in_eeprom() || !firewall_ble_has_psram())
         #endif
         {
           btStop();
@@ -1170,7 +1173,7 @@ void setup() {
 
 #ifdef RTNODE_BLE
       // Bluetooth LE peer slots: registered now, online when a peer arrives.
-      if (firewall_state.ble_enabled) {
+      if (firewall_state.ble_enabled && firewall_ble_has_psram()) {
         ble::register_interfaces();
       }
 #endif
@@ -1282,9 +1285,10 @@ void setup() {
       // in the captive-portal configuration.
       advertise_init();
 #ifdef RTNODE_BLE
-      if (firewall_state.ble_enabled) {
+      if (firewall_state.ble_enabled && firewall_ble_has_psram()) {
         ble::start();
       }
+      firewall_state.ble_running = ble::is_started();
 #endif
 #endif
 
@@ -2949,7 +2953,7 @@ void loop() {
     ble::loop();
   }
   // For the display; Bluetooth runs with WiFi off too (LoRa-only repeater).
-  firewall_state.ble_peers = firewall_state.ble_enabled ? ble::connected_peers() : 0;
+  firewall_state.ble_peers = firewall_state.ble_running ? ble::connected_peers() : 0;
 #endif
 #endif
 

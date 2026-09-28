@@ -182,7 +182,7 @@ The web form's sections include:
 #### 📱 Bluetooth (V4)
 | Field | Description |
 |-------|-------------|
-| **Bluetooth Peers** | Enable/Disable — lets phones running [Columba](https://github.com/torlando-tech/columba), and Prns nodes, join the local network over Bluetooth LE, up to four at a time. **Enabled by default.** Bluetooth peers are LAN-side, trusted like LoRa; takes effect after a restart and uses about 70 KB of memory while on |
+| **Bluetooth Peers** | Enable/Disable — lets phones running [Columba](https://github.com/torlando-tech/columba), and Prns nodes, join the local network over Bluetooth LE, up to four at a time. **Enabled by default.** Bluetooth peers are LAN-side, trusted like LoRa; takes effect after a restart and uses about 70 KB of memory while on. Needs the board's PSRAM: on V4 boards with 8 MB octal PSRAM, whose PSRAM this build does not start yet, Bluetooth stays off and the page says so |
 
 #### 📻 LoRa Radio
 | Field | Description |
@@ -236,7 +236,7 @@ The 128×64 OLED is split into two panels:
 - **Filled circle (●)** = active/connected
 - **Unfilled circle (○)** = inactive/disconnected
 - Labels are UPPERCASE when active, lowercase when inactive (except LAN which is always uppercase)
-- **BLE** sits beside LORA on the V4: `ble` with an unfilled circle while Bluetooth waits for a peer, `BLE` filled once a Columba phone or Prns node is connected. **Hidden** when Bluetooth is disabled in configuration
+- **BLE** sits beside LORA on the V4: `ble` with an unfilled circle while Bluetooth waits for a peer, `BLE` filled once a Columba phone or Prns node is connected. **Hidden** when Bluetooth is disabled in configuration, or cannot run (no PSRAM)
 - **LAN row is hidden** when the Local TCP Server is disabled in configuration — the remaining layout stays in place
 
 ### Right Panel — Device Info (64×64)

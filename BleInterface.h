@@ -312,6 +312,12 @@ inline void start() {
     // NimBLE task touch it, never an interrupt.
     static StaticQueue_t write_queue_state;
     uint8_t* write_storage = (uint8_t*)heap_caps_malloc(WRITE_DEPTH * sizeof(WriteEvent), MALLOC_CAP_SPIRAM);
+    if (!write_storage) {
+        // No PSRAM (the caller checks, firewall_ble_has_psram()), or none
+        // left: NimBLE's own pools live there too and would assert.
+        Serial.println("[BLE] not started: no PSRAM for its memory");
+        return;
+    }
     write_queue = xQueueCreateStatic(WRITE_DEPTH, sizeof(WriteEvent), write_storage, &write_queue_state);
     const RNS::Bytes& identity_hash = RNS::Transport::identity().hash();
     memcpy(our_identity, identity_hash.data(), IDENTITY_LEN);
@@ -619,6 +625,8 @@ static void report() {
                       (unsigned long)s->enomem, (unsigned long)s->notify_errors);
     }
 }
+
+inline bool is_started() { return started; }
 
 // Peers connected and identified right now (the display's Bluetooth bubble).
 inline uint8_t connected_peers() {

@@ -792,8 +792,8 @@ void draw_stat_area() {
 
 #ifdef RTNODE_BLE
     // Row 1, second column — BLE: filled with a peer connected, hollow while
-    // waiting for one, hidden when Bluetooth is off (like LAN)
-    if (firewall_state.ble_enabled) {
+    // waiting for one, hidden when Bluetooth is off or cannot run (like LAN)
+    if (firewall_state.ble_running) {
       stat_area.fillCircle(40, 4, 3, firewall_state.ble_peers > 0 ? SSD1306_WHITE : SSD1306_BLACK);
       stat_area.drawCircle(40, 4, 3, SSD1306_WHITE);
       stat_area.setCursor(46, 6);

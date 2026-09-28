@@ -378,6 +378,13 @@ static void config_send_html() {
         "<p class='note'>Lets phones running Columba, and Prns nodes, connect over Bluetooth and "
         "join the local network alongside LoRa and WiFi clients, up to four at a time. "
         "On by default. Takes effect after a restart; uses about 70 KB of memory while on.</p>"
+    );
+    if (!firewall_ble_has_psram()) {
+        html += F("<p class='note' style='color:#f0a040'>This board's PSRAM did not start, and Bluetooth "
+                  "keeps its memory there, so it stays off whatever this is set to. Heltec V4 boards "
+                  "with 8 MB octal PSRAM need a build of their own for it.</p>");
+    }
+    html += F(
         "<label>Bluetooth Peers</label>"
         "<select name='ble_en'>"
     );

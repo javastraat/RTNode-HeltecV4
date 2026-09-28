@@ -124,6 +124,11 @@ static void tlsf_create_pool() {
 #if defined(ESP32)
 	_new_in_psram = ESP.getPsramSize() > 0;
 #endif
+#ifdef RTNODE_BENCH_NO_PSRAM
+	// Bench only: run as a board whose PSRAM did not start (a V4 with octal
+	// PSRAM under the quad build, issue #44).
+	_new_in_psram = false;
+#endif
 }
 
 // CBA Added attribute weak to avoid collision with new override on nrf52
