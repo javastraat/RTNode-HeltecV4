@@ -249,14 +249,78 @@ radio off ("Radio state mismatch", state offline) because its stored target
 firmware hash was blank EEPROM; fixed with `rnodeconf --firmware-hash
 <actual hash>` (read with `--get-firmware-hash`), as in LEARNED_SO_FAR.md.
 
+**Ingress control (2026-09-27; James: "ingress only for now").** Python
+RNS 1.5.2's announce ingress control, ported into microReticulum
+([Interface.cpp](lib/microReticulum/src/Interface.cpp),
+[Transport.cpp](lib/microReticulum/src/Transport.cpp), constants in
+[Type.h](lib/microReticulum/src/Type.h)). Each source keeps its last 48
+announce arrivals; its rate is their count over the time since the oldest
+(three needed; arrivals over 10 s old are forgotten one per check). Past
+3/s from a source younger than two hours (10/s once established), announces
+for destinations not in the path table are held — unless a path request is
+waiting for them. The burst ends once the rate has stayed under the
+threshold for 15 s; then one held announce goes back through `inbound()`
+every 5 s, fewest hops first. Where RTNode differs from the reference, and
+why:
+
+- *State per TCP client.* Python spawns an interface per client of a TCP
+  server; RTNode's local server is one interface. With one shared state a
+  flooding client held a second client's announce (path test failed), so each
+  client slot has its own, reset on connect.
+- *Every announce counts* toward the rate, where Python counts only those
+  whose signature verifies: verifying signatures is the work a flood makes an
+  ESP32 do. Released announces are verified as normal.
+- *A total cap.* Python caps 256 per interface. A node has up to eight TCP
+  clients, the backbone slots and LoRa, so the total is capped at 512 (about
+  128 KB of PSRAM); without PSRAM, 32 per source and in total. Announces that
+  find the store full are dropped and counted (`ic_drop` in `[RES]`).
+- *Releases wait for the burst to end.* Python releases while a burst is
+  still active too, and `inbound()` then holds the announce again; the
+  outcome is the same. Released announces skip ingress control on their way
+  back: the TCP server would credit them to whichever client sent data last.
+- *Path requests are not ingress-controlled yet.* 1.5.2 also counts path
+  requests per source (3/s new, 8/s established) and, in a burst, stops
+  forwarding them on. Not ported (a follow-up candidate).
+
+Timing runs on milliseconds since boot, not `OS::time()`, which jumps when
+Reticulum restores its saved offset after interfaces register (a
+registration stamp made every source look hours old).
+
+**Port from the wrong reference, caught.** The first port followed
+`Reticulum-master/`, which is RNS **1.1.3**: six samples, 3.5/12 per second,
+a 60 s hold, then 300 s before releasing one every 30 s — a client that
+announced two destinations at once had the second held for six minutes, and
+256 held took two hours to drain. 1.5.2 (in `.venv`, the version the
+workspace audits against) replaced all of that. Check `RNS/_version.py`
+before porting from the mirror.
+
+Cost: about 250 B of PSRAM per held announce (256 held measured at ~65 KB);
+per source 48 × 4 B of arrival times, in PSRAM with the interface.
+
+**Found with it: early returns stopped `jobs()`.** `inbound()` and
+`outbound()` set `_jobs_locked` and must clear it on the way out; Python
+clears it before every return. Several returns here did not — unpack
+failures, the firewall's WL-BLOCK drop, cache requests, expired or stale
+paths — nor did the first cut of the ingress hold. Until another packet went
+all the way through, `jobs()` did nothing: no announce rebroadcasts, table
+culls or link checks. Under an all-held flood it never ran, and a legitimate
+client's announce was not rebroadcast until an unrelated client connected
+18 s later. A scope guard now clears the lock on every exit (5e40d23).
+Released firmware has the WL-BLOCK case: on a backbone, each dropped unknown
+packet pauses `jobs()` until the next packet passes.
+
 **Fix direction** (each measured on its own, rule 1)
 
 - Event-driven LoRa TX: route TxDone to DIO1, send one packet per TxDone
   event, run CSMA per packet, and return to `loop()` between packets.
+  **Done** (0bb88d4).
 - Reference-parity announce policy on LoRa: set the interface bitrate from
-  SF/BW and restore an announce cap in firewall builds.
-- An announce-ingress budget for LAN-side transport peers (rule 6).
+  SF/BW and restore an announce cap in firewall builds. **Declined for now**
+  (2026-09-27).
+- An announce-ingress budget for LAN-side transport peers (rule 6). **Done**:
+  Python's ingress control, above.
 - Flash writes off the per-announce path if the flash A/B implicates them.
+  **Done** (e03d5d1, RAM announce cache).
 
 ## PSRAM is not backing the Reticulum heap (quad V4, today)
 
@@ -409,3 +473,11 @@ Each step's results go in the log below before the next step starts.
 | 2026-09-27 | + event-driven LoRa TX (0bb88d4) | V4.2 | B flood 1/s 5 min | 191 KB | ≤ 1 ms / 17.4 s | 0 % / 186 ms | 0 | LoRa TX blocks loop 10–16 ms/min (was up to 85 s); no reboot; stalls now the once-a-minute cache cleanup: 69–90 deletes + ~8 s unattributed each; 300 cache writes, 208 deletes in 5 min; 354 queue drops (flood ≫ SF10 capacity) |
 | 2026-09-27 | + RAM announce cache | V4.2 | B flood 1/s 5 min | 194 KB | ≤ 1 ms / 2.1 s | 0 % / 190 ms | 0 | 5 stalls (was 166); flash 0.6–1.5 s/min (was 17–20 s); path requests answered from the RAM cache in 0.48 s (`tests/bench_path_response.py`) |
 | 2026-09-27 | + RAM announce cache (e03d5d1) | V4.2 + stock RNode (Heltec V3, fw 1.86) | lora-to-local-tcp proof probe | — | — | — | — | **LoRa RX and TX verified with event-driven TX**: path in 4.3 s, delivered with proof, RTT 6.3 s. The proof waited behind a queued 183-byte announce (FIFO, 1.84 s airtime) plus a 0.8 s CSMA gap per packet |
+| 2026-09-27 | + ingress control (1.1.3 rules), per interface | V4.2 | B flood 5/s 150 s | 198 KB | ≤ 5 ms / 319 ms | 0 % / — | 0 | burst detected at once; path table stayed at 1 entry; **path test FAIL**: the shared state held a second client's announce |
+| 2026-09-27 | + per-client state (b17ec04) | V4.2 | B flood 5/s 150 s | 195 KB | ≤ 5 ms / 398 ms | 0 % / 168 ms | 0 | path test INVALID: A's announce not rebroadcast for 18 s — `jobs()` locked by the hold's early return |
+| 2026-09-27 | + jobs lock guard (5e40d23) | V4.2 | B flood 5/s 150 s | 197 KB | ≤ 5 ms / 427 ms | 0 % / 166 ms | 0 | **path test PASS**, 1.40 s mid-flood, answered by RTNode (2 hops); 256 held |
+| 2026-09-27 | + jobs lock guard (5e40d23) | V4.2 | B flood 1/s 10 min | 192 KB | ≤ 1 ms / 2.6 s | 0 % / 186 ms | 0 | below the burst threshold, nothing held; 13 stalls (once-a-minute persistence, as before); 186 LoRa TX = 334 s airtime of 600 s; 919 LoRa queue drops (announce cap declined) |
+| 2026-09-27 | + total cap, ic_drop (0fc5626) | V4.2 | B flood 5/s 150 s | 197 KB | ≤ 5 ms / 446 ms | 0 % / 175 ms | 0 | path test PASS 1.34 s; ic_held=256 ic_drop=471 |
+| 2026-09-27 | 1.5.2 ingress rules (d0d15cf) | V4.2 | ingress release test | — | — | — | — | `tests/bench_ingress_release.py` PASS: burst at the third announce; nothing leaked during the hold; burst over 16.5 s after the flood stopped; releases 0.5 s later, then 5.2 s apart, oldest first |
+| 2026-09-27 | 1.5.2 ingress rules (d0d15cf) | V4.2 | B flood 5/s 150 s | 197 KB | ≤ 5 ms / 521 ms | 0 % / 166 ms | 0 | path test PASS 0.90 s; ic_held=256 ic_drop=488 |
+| 2026-09-27 | 1.5.2 ingress rules (d0d15cf) | V4.2 | B flood 10/s 150 s | 197 KB | ≤ 5 ms / 401 ms | 0 % / 157 ms | 0 | path test PASS 0.43 s; ic_held=256 ic_drop=1226 |
