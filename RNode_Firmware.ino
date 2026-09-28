@@ -1032,6 +1032,18 @@ void setup() {
       firewall_state.ap_tcp_enabled = true;
       firewall_state.ap_tcp_port = 4242;
       Serial.write("[BENCH] overrides: backbones off, local TCP server on 4242 (saved settings untouched)\r\n");
+#ifdef RTNODE_BENCH_WAN_HOST
+      // WAN contract tests (tests/bench_contracts.py wan): backbone 1 goes to
+      // a stand-in backbone on the bench (tests/wan-backbone/config), never a
+      // public one. Build with PLATFORMIO_BUILD_FLAGS=
+      // '-DRTNODE_BENCH_WAN_HOST=\"<bench machine>\" -DRTNODE_BENCH_WAN_PORT=4290'.
+      firewall_state.backbones[0].enabled = true;
+      strncpy(firewall_state.backbones[0].host, RTNODE_BENCH_WAN_HOST, sizeof(firewall_state.backbones[0].host) - 1);
+      firewall_state.backbones[0].host[sizeof(firewall_state.backbones[0].host) - 1] = '\0';
+      firewall_state.backbones[0].port = RTNODE_BENCH_WAN_PORT;
+      Serial.printf("[BENCH] overrides: backbone 1 -> %s:%u (bench stand-in backbone)\r\n",
+                    firewall_state.backbones[0].host, (unsigned)firewall_state.backbones[0].port);
+#endif
 #ifdef RTNODE_BENCH_ADVERT
       // Advert test build (env rtnode_heltec_v4_bench_advert,
       // tests/bench_advert_ifac.py): IFAC and advertising on with throwaway

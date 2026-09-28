@@ -1,0 +1,28 @@
+# Stand-in WAN backbone for RTNode's WAN contract tests
+# (tests/bench_contracts.py wan). A bench build with RTNODE_BENCH_WAN_HOST
+# points backbone 1 here, and the tests' WAN agents connect here too. It is a
+# transport node with this one TCP server and nothing else, so no test
+# traffic leaves the bench.
+#
+#   ../.venv/bin/rnsd --config tests/wan-backbone
+#
+# mode = gateway: a transport node looks for unknown paths only on requests
+# from gateway-mode interfaces (RNS DISCOVER_PATHS_FOR), and the tests look
+# up never-announced destinations across it. ingress_control = No: floods
+# must reach RTNode, whose own filtering is what is under test.
+[reticulum]
+  enable_transport = Yes
+  share_instance = No
+  panic_on_interface_error = No
+
+[logging]
+  loglevel = 4
+
+[interfaces]
+  [[Bench backbone]]
+    type = TCPServerInterface
+    enabled = Yes
+    listen_ip = 0.0.0.0
+    listen_port = 4290
+    mode = gateway
+    ingress_control = No

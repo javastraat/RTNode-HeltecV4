@@ -17,6 +17,7 @@ lan-flood refuses to start unless the node prints the bench build's
 "backbones off" mark, so the flood never reaches a public backbone.
 """
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -157,6 +158,19 @@ def start_bench_node(serial_port, host, port, out, isolated):
     if isolated:
         if not capture.wait_for("[BENCH] overrides: backbones off", reset_at, 5):
             sys.exit("no 'backbones off' mark: refusing to test a node that may be connected to a public backbone")
+        # A WAN contract build (RTNODE_BENCH_WAN_HOST) turns one backbone back
+        # on, to a stand-in on the bench; it must stay on the bench network.
+        stand_in = "[BENCH] overrides: backbone 1 -> "
+        if capture.wait_for(stand_in, reset_at, 1):
+            with capture.lock:
+                line = next(text for t, text in capture.lines if t >= reset_at and stand_in in text)
+            host = line.split(stand_in, 1)[1].rsplit(":", 1)[0]
+            try:
+                private = ipaddress.ip_address(host).is_private
+            except ValueError:
+                private = False
+            if not private:
+                sys.exit(f"backbone 1 goes to {host}: refusing to test through a backbone off the bench network")
         if not tcp_ready(host, port, 60):
             sys.exit(f"local TCP server {host}:{port} not reachable")
     return capture
