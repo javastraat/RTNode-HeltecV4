@@ -17,8 +17,18 @@ every 10 s, so load tests can run while it does:
 
 The control file (default tests/bench-results/ble-peer/control.json) holds
 {"mode": "echo", "rate": 5, "size": 180}, {"mode": "idle"} (connected, no
-traffic) or {"mode": "off"} (disconnected); it is read every second. Records
-go to tests/bench-results/ble-peer/log.jsonl.
+traffic), {"mode": "off"} (disconnected) or {"mode": "relay"}; it is read
+every second. Records go to tests/bench-results/ble-peer/log.jsonl.
+
+Relay mode is for the RTNode Bluetooth interface (BleInterface.h): the peer
+acts as a ble-reticulum v2.2 central, as Columba does — reads the node's
+identity, subscribes to TX, writes its own 16-byte identity to RX, sends a
+0x00 keepalive every 15 s — and bridges whole Reticulum packets to and from
+UDP on 127.0.0.1: datagrams arriving on udp_in (default 4250) go out as
+fragments, and packets reassembled from notifications go to udp_out (default
+4251). An RNS UDPInterface on the other end puts real Reticulum traffic
+through the node (tests/bench_ble_rns.py). "chunk" caps fragment payloads to
+exercise reassembly.
 
 Needs the spike build (env rtnode_heltec_v4_bench_ble) and Bluetooth access
 for the app running it. macOS asks once in Terminal; it refuses without
@@ -130,6 +140,88 @@ async def run(args):
 HERE = os.path.dirname(os.path.abspath(__file__))
 PEER_DIR = os.path.join(HERE, "bench-results", "ble-peer")
 DEFAULT_CONTROL = {"mode": "echo", "rate": 5.0, "size": 180}
+TX = "37145b00-442d-4a94-917f-8f42c5da28e4"
+RX = "37145b00-442d-4a94-917f-8f42c5da28e5"
+IDENTITY = "37145b00-442d-4a94-917f-8f42c5da28e6"
+KEEPALIVE_EVERY = 15.0
+
+
+def fragments(packet, chunk):
+    """ble-reticulum's BLEFragmenter: [type][seq u16][total u16][data]."""
+    total = (len(packet) + chunk - 1) // chunk
+    for seq in range(total):
+        kind = 0x01 if seq == 0 else (0x03 if seq == total - 1 else 0x02)
+        yield struct.pack(">BHH", kind, seq, total) + packet[seq * chunk:(seq + 1) * chunk]
+
+
+async def relay_session(client, control, control_path, emit):
+    stats = {"up": 0, "up_bytes": 0, "down": 0, "down_bytes": 0, "bad": 0, "keepalives": 0}
+    assembly = {"buf": bytearray(), "total": 0, "next": 0, "active": False}
+    udp_out = ("127.0.0.1", int(control.get("udp_out", 4251)))
+    outgoing = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    class Inbound(asyncio.DatagramProtocol):
+        def datagram_received(self, data, addr):
+            outgoing.put_nowait(data)
+
+    udp, _ = await loop.create_datagram_endpoint(
+        Inbound, local_addr=("127.0.0.1", int(control.get("udp_in", 4250))))
+
+    def on_notify(_, data):
+        data = bytes(data)
+        if len(data) < 5:
+            stats["bad"] += 1
+            return
+        _kind, seq, total = struct.unpack(">BHH", data[:5])
+        if seq == 0:
+            assembly.update(buf=bytearray(), total=total, next=0, active=True)
+        elif not assembly["active"] or total != assembly["total"] or seq != assembly["next"]:
+            stats["bad"] += 1
+            assembly["active"] = False
+            return
+        assembly["buf"] += data[5:]
+        assembly["next"] += 1
+        if assembly["next"] == assembly["total"]:
+            assembly["active"] = False
+            udp.sendto(bytes(assembly["buf"]), udp_out)
+            stats["down"] += 1
+            stats["down_bytes"] += len(assembly["buf"])
+
+    try:
+        identity = bytes.fromhex(control["identity"]) if control.get("identity") else os.urandom(16)
+        node_identity = bytes(await client.read_gatt_char(IDENTITY))
+        await client.start_notify(TX, on_notify)
+        await client.write_gatt_char(RX, identity, response=True)
+        chunk = min(int(control.get("chunk", 512)), client.mtu_size - 3) - 5
+        emit(event="relay_up", node_identity=node_identity.hex(), identity=identity.hex(),
+             mtu=client.mtu_size, chunk=chunk)
+        next_keepalive, next_report, control_read_at = (time.time() + KEEPALIVE_EVERY,
+                                                        time.time() + REPORT_EVERY, time.time())
+        while client.is_connected:
+            if time.time() - control_read_at >= 1.0:
+                control_read_at = time.time()
+                if read_control(control_path)["mode"] != "relay":
+                    break
+            try:
+                packet = await asyncio.wait_for(outgoing.get(), timeout=0.2)
+            except asyncio.TimeoutError:
+                packet = None
+            if packet:
+                for fragment in fragments(packet, chunk):
+                    await client.write_gatt_char(RX, fragment, response=True)
+                stats["up"] += 1
+                stats["up_bytes"] += len(packet)
+            if time.time() >= next_keepalive:
+                await client.write_gatt_char(RX, b"\x00", response=True)
+                stats["keepalives"] += 1
+                next_keepalive += KEEPALIVE_EVERY
+            if time.time() >= next_report:
+                emit(event="relay", **stats)
+                next_report += REPORT_EVERY
+    finally:
+        udp.close()
+    emit(event="relay_down", **stats)
 REPORT_EVERY = 10.0
 LOST_AFTER = 5.0  # an echo not back after this long counts as lost
 
@@ -174,6 +266,9 @@ async def serve(args):
         try:
             async with BleakClient(device) as client:
                 emit(event="connected", mtu=client.mtu_size)
+                if control["mode"] == "relay":
+                    await relay_session(client, control, args.control, emit)
+                    continue
                 await client.start_notify(DATA, on_notify)
                 seq, next_send, next_report = 0, time.time(), time.time() + REPORT_EVERY
                 control_read_at = time.time()

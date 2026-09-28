@@ -367,6 +367,10 @@ namespace RNS {
 		static void handle_tunnel(const Bytes& tunnel_id, const Interface& interface);
 		static void register_interface(Interface& interface);
 		static void deregister_interface(const Interface& interface);
+		// A peer left an interface that the next peer will reuse (a Bluetooth
+		// slot): forget the paths, links and reverse entries through it, as
+		// Python RNS does for a detached spawned interface. Returns how many.
+		static size_t forget_interface_routes(const Interface& interface);
 		static void register_local_client_interface(Interface& interface);
 		inline static const std::map<Bytes, Interface&> get_interfaces() { return _interfaces; }
 		static void register_destination(Destination& destination);

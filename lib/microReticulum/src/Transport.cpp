@@ -3012,6 +3012,43 @@ static uint32_t ingress_dropped = 0;
 	TRACE("Transport: Registered trusted local client interface " + interface.toString());
 }
 
+/*static*/ size_t Transport::forget_interface_routes(const Interface& interface) {
+	size_t forgotten = 0;
+	const Bytes interface_hash = interface.get_hash();
+	for (auto iter = _destination_table.begin(); iter != _destination_table.end(); ) {
+		auto& paths = iter->second;
+		size_t before = paths.size();
+		paths.erase(std::remove_if(paths.begin(), paths.end(),
+		                           [&](const PathEntry& path) { return path.receiving_interface == interface_hash; }),
+		            paths.end());
+		forgotten += before - paths.size();
+		if (paths.empty()) {
+			iter = _destination_table.erase(iter);
+		}
+		else {
+			++iter;
+		}
+	}
+	for (auto iter = _link_table.begin(); iter != _link_table.end(); ) {
+		if (iter->second._receiving_interface == interface || iter->second._outbound_interface == interface) {
+			iter = _link_table.erase(iter);
+			forgotten++;
+		}
+		else {
+			++iter;
+		}
+	}
+	size_t reverse_before = _reverse_table.size();
+	_reverse_table.erase(std::remove_if(_reverse_table.begin(), _reverse_table.end(),
+	                                    [&](const std::pair<Bytes, ReverseEntry>& entry) {
+		                                    return entry.second._receiving_interface == interface ||
+		                                           entry.second._outbound_interface == interface;
+	                                    }),
+	                     _reverse_table.end());
+	forgotten += reverse_before - _reverse_table.size();
+	return forgotten;
+}
+
 /*static*/ void Transport::deregister_interface(const Interface& interface) {
 	TRACE("Transport: Deregistering interface " + interface.toString());
 #if defined(INTERFACES_SET)
