@@ -61,6 +61,7 @@ void loop_end();          // also emits [STALL] and the periodic [RES] line
 void boot_report();
 void note_lora_queued(uint16_t queue_height);
 void note_lora_drop();
+void note_lora_split_drop();   // half of a split LoRa packet discarded
 
 #else
 
@@ -79,6 +80,7 @@ inline void loop_end() {}
 inline void boot_report() {}
 inline void note_lora_queued(uint16_t) {}
 inline void note_lora_drop() {}
+inline void note_lora_split_drop() {}
 
 #endif
 

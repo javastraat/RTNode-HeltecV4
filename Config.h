@@ -166,7 +166,6 @@
 	uint8_t seq				= 0xFF;
 	uint8_t last_seq		= 0xFF;  // sequence of most recently completed split
 	uint16_t read_len		= 0;
-	uint16_t host_write_len = 0;
 
 	// Incoming packet buffer
 	uint8_t pbuf[MTU];
