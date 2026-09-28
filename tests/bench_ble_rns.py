@@ -15,7 +15,7 @@ Checks, each within a time limit:
     ../.venv/bin/python tests/bench_ble_rns.py --host 192.168.2.125 [--chunk 100]
 
 --chunk caps the relay's fragment payload, so A's packets reach the node in
-several fragments. Needs the node on the rtnode_heltec_v4_bench_bleif build
+several fragments. Needs a V4 bench build with Bluetooth on (the default)
 and the peer running with --serve.
 """
 import argparse

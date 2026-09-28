@@ -107,13 +107,14 @@
 #define ADDR_CONF_MDNS_NAME     0x152 // Custom mDNS hostname (33 bytes, null-terminated; empty = auto)
 #define ADDR_CONF_PROBE_EN      0x23C // rnprobe responder enable (1 byte; 0x73 = enabled, 0xFF = unset/disabled)
 #define ADDR_CONF_ADVERT_IFAC   0x23D // Publish IFAC name + passphrase in adverts (1 byte; 0x73 = yes, 0xFF = unset = no)
+#define ADDR_CONF_BLE_EN        0x23E // Bluetooth peers (1 byte; 0x00 = off, 0x73 or 0xFF = unset = on)
 // Extra backbone slots 1-3 (slot 0 remains in the legacy BTCP/BHOST/BHPORT
 // fields for backward compatibility with existing devices).
 #define ADDR_CONF_BSLOT_BASE    0x173
 #define ADDR_CONF_BSLOT_EN(slot)   (ADDR_CONF_BSLOT_BASE + ((slot) - 1) * FIREWALL_BACKBONE_SLOT_BYTES)
 #define ADDR_CONF_BSLOT_HOST(slot) (ADDR_CONF_BSLOT_EN(slot) + 1)
 #define ADDR_CONF_BSLOT_PORT(slot) (ADDR_CONF_BSLOT_HOST(slot) + FIREWALL_BACKBONE_HOST_LEN)
-// Total: 0x23D (573 bytes — still within the extended CONFIG area used on ESP32)
+// Total: 0x23E (574 bytes — still within the extended CONFIG area used on ESP32)
 
 #define FIREWALL_ENABLE_BYTE 0x73
 #define FIREWALL_APP_MARKER0 0x52
@@ -156,6 +157,10 @@ struct FirewallState {
     // Include the IFAC network name and passphrase in adverts, so anyone who
     // receives one can join — RNS's publish_ifac, off by default.
     bool     advert_publish_ifac;
+
+    // Bluetooth LE peers (BleInterface.h): on unless turned off. Applied at
+    // boot, since the controller's memory is released when it is off.
+    bool     ble_enabled;
     char     node_name[33];   // Human-readable name (empty = auto from node hash)
 
     // Airtime / duty-cycle limits, in fraction (0.0 = disabled, 0.01 = 1%).
@@ -256,6 +261,14 @@ inline bool firewall_read_double(int addr, double& out) {
     return true;
 }
 
+// Whether Bluetooth peers are on, straight from EEPROM: setup() decides
+// whether to release the Bluetooth controller's memory before the rest of
+// the configuration is loaded. On unless explicitly turned off, so unset
+// bytes (every save before this setting existed) mean on.
+inline bool firewall_ble_enabled_in_eeprom() {
+    return EEPROM.read(config_addr(ADDR_CONF_BLE_EN)) != 0x00;
+}
+
 inline void firewall_load_config() {
     // Check if firewall mode is configured
     uint8_t bmode = EEPROM.read(config_addr(ADDR_CONF_BMODE));
@@ -287,6 +300,7 @@ inline void firewall_load_config() {
         firewall_state.advert_lon = 0.0;
         firewall_state.advert_jitter = false;
         firewall_state.advert_publish_ifac = false;
+        firewall_state.ble_enabled = true;
         firewall_state.node_name[0] = '\0';
         firewall_state.st_airtime_limit = 0.0f;
         firewall_state.lt_airtime_limit = 0.0f;
@@ -452,6 +466,8 @@ inline void firewall_load_config() {
         firewall_state.probe_enabled = (probe_byte == FIREWALL_ENABLE_BYTE);
     }
 
+    firewall_state.ble_enabled = firewall_ble_enabled_in_eeprom();
+
     // Reset runtime state
     firewall_state.packets_bridged_lora_to_tcp = 0;
     firewall_state.packets_bridged_tcp_to_lora = 0;
@@ -557,6 +573,10 @@ inline void firewall_save_config() {
     // rnprobe responder
     EEPROM.write(config_addr(ADDR_CONF_PROBE_EN),
                  firewall_state.probe_enabled ? FIREWALL_ENABLE_BYTE : 0x00);
+
+    // Bluetooth peers
+    EEPROM.write(config_addr(ADDR_CONF_BLE_EN),
+                 firewall_state.ble_enabled ? FIREWALL_ENABLE_BYTE : 0x00);
 
     EEPROM.write(config_addr(ADDR_CONF_APP_MARKER0), FIREWALL_APP_MARKER0);
     EEPROM.write(config_addr(ADDR_CONF_APP_MARKER1), FIREWALL_APP_MARKER1);

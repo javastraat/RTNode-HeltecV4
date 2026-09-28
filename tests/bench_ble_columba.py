@@ -11,6 +11,10 @@ the delivery proof to come back the same way.
 
 Columba logs its delivery destination at start ("Ratchets enabled on
 <lxmf.delivery.<identity>:<destination>>"). The phone shows the message.
+
+With --listen SECONDS the client then announces itself, so the phone can
+reply, and stays up that long printing whatever arrives: the reply comes
+back phone -> Bluetooth -> RTNode -> TCP.
 """
 import argparse
 import os
@@ -33,6 +37,7 @@ def main():
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, default=4242)
     parser.add_argument("--destination", required=True, help="Columba's lxmf.delivery hash (hex)")
+    parser.add_argument("--listen", type=float, default=0, help="then announce and wait this long for replies")
     args = parser.parse_args()
 
     import RNS
@@ -48,7 +53,10 @@ def main():
     identity = RNS.Identity()
     router = LXMF.LXMRouter(identity=identity, storagepath=os.path.join(work, "lxmf"))
     source = router.register_delivery_identity(identity, display_name="RTNode bench")
+    replies = []
+    router.register_delivery_callback(lambda m: replies.append((time.time(), m)))
     time.sleep(3)  # the TCP connection
+    print(f"   this client is {RNS.prettyhexrep(source.hash)} (\"RTNode bench\")", flush=True)
 
     phone = bytes.fromhex(args.destination)
     failures = []
@@ -80,10 +88,27 @@ def main():
         failures.append("the message was " + ("refused or failed" if "failed" in outcome else "not delivered in 90 s")
                         + f" (state {message.state})")
 
+    if args.listen:
+        # Announce, so the phone knows this identity and can reply.
+        router.announce(source.hash)
+        print(f"3. announced; waiting {args.listen:.0f} s for a reply from the phone", flush=True)
+        deadline = time.time() + args.listen
+        seen = 0
+        while time.time() < deadline:
+            while seen < len(replies):
+                at, reply = replies[seen]
+                seen += 1
+                print(f"   reply {seen} from {RNS.prettyhexrep(reply.source_hash)} at {time.strftime('%H:%M:%S', time.localtime(at))}: "
+                      f"{reply.content_as_string()!r}", flush=True)
+            time.sleep(0.5)
+        if not replies:
+            failures.append("no reply from the phone")
+
     for failure in failures:
         print("FAIL: " + failure, flush=True)
     if not failures:
-        print("PASS: path and direct LXMF delivery to Columba through RTNode's Bluetooth", flush=True)
+        print("PASS: path and direct LXMF delivery to Columba through RTNode's Bluetooth"
+              + (", and the phone's reply came back" if args.listen else ""), flush=True)
     os._exit(1 if failures else 0)
 
 

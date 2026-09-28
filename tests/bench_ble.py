@@ -47,7 +47,9 @@ from bleak import BleakClient, BleakScanner
 
 SERVICE = "37145b00-442d-4a94-917f-8f42c5da28e3"
 DATA = "37145b00-442d-4a94-917f-8f42c5da28e8"
-# BleSpike.h, after Prns commit d48e9fc and Columba.
+# The one-shot, echo and idle modes measure the Bluetooth spike build
+# (BleSpike.h, removed after e52aa4c; in git history), whose GATT table
+# follows Prns commit d48e9fc and Columba. Relay mode is for BleInterface.h.
 EXPECTED = {
     "37145b00-442d-4a94-917f-8f42c5da28e4": {"notify"},                           # Columba TX
     "37145b00-442d-4a94-917f-8f42c5da28e5": {"write", "write-without-response"},  # Columba RX

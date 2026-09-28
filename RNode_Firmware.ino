@@ -36,7 +36,6 @@
 #include "TcpInterface.h"
 #include "FirewallConfig.h"
 #include "Advertise.h"
-#include "BleSpike.h"
 #include "BleInterface.h"
 #include "MdnsService.h"
 #include "esp_bt.h"
@@ -836,13 +835,19 @@ void setup() {
         esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
       #endif
     #else
-      #if defined(FIREWALL_MODE) && !defined(RTNODE_BLE_SPIKE) && !defined(RTNODE_BLE)
+      #if defined(FIREWALL_MODE)
         // Even when BLE/BT are compile-time disabled (e.g. V3 boundary),
-        // the ESP32 BT controller is still loaded. Release its ~70KB of RAM.
-        // (Bluetooth builds keep it: BleSpike.h, BleInterface.h.)
-        btStop();
-        esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
-        Serial.write("[Boundary] Released BT controller memory\r\n");
+        // the ESP32 BT controller is still loaded. Release its ~70KB of RAM,
+        // unless Bluetooth peers are on (BleInterface.h): released memory
+        // cannot come back without a reboot.
+        #if defined(RTNODE_BLE)
+        if (!firewall_ble_enabled_in_eeprom())
+        #endif
+        {
+          btStop();
+          esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
+          Serial.write("[Boundary] Released BT controller memory\r\n");
+        }
       #endif
     #endif
 
@@ -1149,7 +1154,9 @@ void setup() {
 
 #ifdef RTNODE_BLE
       // Bluetooth LE peer slots: registered now, online when a peer arrives.
-      ble::register_interfaces();
+      if (firewall_state.ble_enabled) {
+        ble::register_interfaces();
+      }
 #endif
 
       // Feed WDT before Reticulum instance creation (loads caches, generates keys)
@@ -1258,11 +1265,10 @@ void setup() {
       // announcer is a no-op until the user has enabled "Advertise Device"
       // in the captive-portal configuration.
       advertise_init();
-#ifdef RTNODE_BLE_SPIKE
-      ble_spike::init();
-#endif
 #ifdef RTNODE_BLE
-      ble::start();
+      if (firewall_state.ble_enabled) {
+        ble::start();
+      }
 #endif
 #endif
 
@@ -2929,9 +2935,6 @@ void loop() {
   if (reticulum) {
     advertise_loop();
   }
-#ifdef RTNODE_BLE_SPIKE
-  ble_spike::loop();
-#endif
 #ifdef RTNODE_BLE
   if (reticulum) {
     ble::loop();

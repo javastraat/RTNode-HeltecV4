@@ -260,7 +260,7 @@ inline void register_interfaces() {
 
 // Once Transport has its identity: the GATT service and advertising.
 inline void start() {
-    if (started || !RNS::Transport::identity()) return;
+    if (started || !slots[0] || !RNS::Transport::identity()) return;
     size_t internal_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     size_t psram_before    = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
 
