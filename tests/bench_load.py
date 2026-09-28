@@ -170,7 +170,8 @@ def percentile(values, fraction):
 
 
 def summarise(args, serial_lines, ping_lines, flood_lines, window_start, window_end, ping_start):
-    summary = {"scenario": args.scenario, "rate": args.rate, "duration_s": args.duration}
+    summary = {"scenario": args.scenario, "rate": args.rate, "duration_s": args.duration,
+               "window_start": round(window_start, 3), "window_end": round(window_end, 3)}
 
     # Ping: every sequence number gets a reply or a timeout line on macOS, so
     # the highest one seen says how many were sent (ping runs a little slower
