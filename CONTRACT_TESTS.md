@@ -162,6 +162,18 @@ All on `bench/instrumentation`, found by these suites:
   Nothing is lost and the soak passes, but the loop is far over its 50 ms
   budget. The next step is splitting `jobs` into interface polling and
   Transport jobs, and asking whether the display needs 6 pushes a second.
+- **Direct LoRa neighbours may be repeated (code review, untested).**
+  FWD-CHECK (firewall mode, from v1.0.41 like fixes 1, 2 and 6) forwards a
+  LAN packet that has no transport header whenever the node has a path to
+  its destination — including when that path leads back out of the
+  interface it came in on. Two LoRa devices talking directly, with the node
+  in range and holding a path to the receiver, would have each data packet
+  and link request sent again by the node on LoRa; a link set up that way
+  gets an entry whose two interfaces are both LoRa, and link transport then
+  repeats every packet of it. Python RNS transport nodes never forward a
+  packet without a transport header. Showing it needs two LoRa endpoints
+  besides the node (the bench has one); the likely fix is to skip FWD-CHECK
+  when the outbound interface is the receiving one on a shared medium.
 - **Whitelists are 200 entries with a linear search.** In use they no longer
   evict, but a LAN with more than 200 addresses active at once would push
   idle ones out, and the search cost grows with the cap. A set would allow a

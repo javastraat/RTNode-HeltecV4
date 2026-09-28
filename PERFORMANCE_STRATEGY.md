@@ -529,6 +529,12 @@ reference (Prns has not tested its R8 support on hardware either).
 
 Each step's results go in the log below before the next step starts.
 
+Alongside this plan, [CONTRACT_TESTS.md](CONTRACT_TESTS.md) (2026-09-28)
+checks that the node still does what apps rely on — LAN routing across TCP,
+Bluetooth and LoRa, the WAN firewall, links and resources, and all three
+radios at once — and found six bugs on the way, five of them in LoRa and
+firewall forwarding. Its soak is the coexistence measure for step 7.
+
 ## Decisions
 
 - 2026-09-27 — Bluetooth peers are LAN-side peers, alongside LAN TCP and LoRa;
@@ -572,3 +578,5 @@ Each step's results go in the log below before the next step starts.
 | 2026-09-28 | Bluetooth interface (a4be90c…819784b) | V4.2 + Mac relay | `bench_ble_rns.py` | — | — | — | — | PASS: announces both ways ~1 s; Link 0.3 s; 10/10 echoes, RTT p50 149 ms (one fragment), 373 ms (peer fragments at 95 B), 421 ms (both at 100 B) |
 | 2026-09-28 | same | V4.2 + Galaxy S23, Columba 2.2.6 | `bench_ble_columba.py` | 137 KB | ≤ 1 ms / 576 ms | — | 0 | PASS: path 1.24 s (never answered before b0c7a86), LXMF delivered; proof back over Bluetooth 126 ms after the message crossed; two peers at once, no drops or bad fragments |
 | 2026-09-28 | + Prns native (04aa2a1), on by default (06efcfb) | V4.2 + prnsd 0.3.7 on the Mac | `bench_ble_rns.py --via prnsd` | 137 KB | — | — | 0 | PASS: Hello answered (Prns peer, MTU 517); announces both ways 0.84 s / 1.67 s (3 hops); Link 0.27 s; 10/10 echoes, RTT p50 392 ms; Columba on another slot throughout |
+| 2026-09-28 | contract fixes (51b9262…5eb13db) | V4.2 + prnsd + stock RNode + stand-in backbone | contract soak, 30 min: WiFi↔BT echo 1/s + 20 kB/min, WAN↔WiFi echo 0.5/s + 20 kB/2 min, LoRa echoes to TCP and BT | 118 KB | ≤ 5 ms / 992 ms | — | 0 | all 5 flows PASS: 1643/1643 and 891/891 echoes, 43/43 resources, LoRa 88/90; no Bluetooth disconnects; heap flat |
+| 2026-09-28 | + loop-time causes (376cb10) | V4.2 | idle and 20/s WAN announce flood | 118 KB | — / 1.2 s | — | 0 | per minute idle: `reticulum.loop()` ~25 s (0.24 ms × ~1,800 passes/s), display ~11 s (31 ms × ~6 pushes/s); flood: receive ~3 ms/packet, Transport jobs 100–470 ms per run, LAN→WAN echo p50 ~750 ms (~200 ms idle) |
