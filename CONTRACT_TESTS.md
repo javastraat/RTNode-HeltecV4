@@ -40,7 +40,14 @@ only way to find the silent one is a path request that the agent answers.
 ../.venv/bin/python tests/bench_contracts.py wan  --media tcp,tcp2 --node-log <serial log>
 ../.venv/bin/python tests/bench_contracts.py soak --media tcp,prnsd,lora --rnode-port /dev/cu.usbserial-0001 \
     --node-log <serial log> --soak-s 1800
+../.venv/bin/python tests/bench_lora_neighbour.py --node-log <serial log>
 ```
+
+`bench_lora_neighbour.py` plays two LoRa devices in range of each other with
+the one RNode: first as a Reticulum endpoint that announces, then raw over
+KISS, sending what its neighbour would (a packet, a link request, a packet on
+that link — none naming a next hop) and listening for RTNode sending any of
+them again.
 
 Results go to `tests/bench-results/<time>-contracts-<suite>/results.json`.
 
@@ -145,6 +152,14 @@ All on `bench/instrumentation`, found by these suites:
    reverse table, one of its own receipts) and seeds nothing.
    `lan-packet-wan` covers the reverse-table case.
 
+7. **Traffic between direct LoRa neighbours repeated** (62747ca). Reticulum
+   names the next hop in every packet but the last; on the last hop the
+   destination is in range and nobody should relay. FWD-CHECK (v1.0.41)
+   relayed such packets whenever the node had a path — back out of the
+   interface they came in on. Two LoRa devices talking directly had every
+   packet and link request sent again, and every packet of their link.
+   `bench_lora_neighbour.py` showed all three on air, and passes now.
+
 ## Open
 
 - **Loop time.** `[STALL]` and `[RES]` now attribute time to `rx` (Reticulum
@@ -173,21 +188,27 @@ All on `bench/instrumentation`, found by these suites:
     their own;
   - releasing one held announce costs ~100 ms (verification and path work),
     every 5 s during a burst;
-  - the once-a-minute stall is `persist_data()` (0.3–1.2 s) plus cache clean
-    (up to 0.2 s) plus the table cull (0.1–0.17 s).
+  - the once-a-minute stall was `persist_data()` (0.3–1.2 s) plus cache
+    clean (up to 0.2 s) plus the table cull (0.1–0.17 s). Paths are now
+    saved an hour after start and then daily, the clock offset hourly
+    (ba3219e): no flash at all after the startup minute, and the idle loop
+    maximum is ~150 ms — the table cull — instead of 1–2.6 s.
   The display question stands too: does it need 6 pushes a second?
-- **Direct LoRa neighbours may be repeated (code review, untested).**
-  FWD-CHECK (firewall mode, from v1.0.41 like fixes 1, 2 and 6) forwards a
-  LAN packet that has no transport header whenever the node has a path to
-  its destination — including when that path leads back out of the
-  interface it came in on. Two LoRa devices talking directly, with the node
-  in range and holding a path to the receiver, would have each data packet
-  and link request sent again by the node on LoRa; a link set up that way
-  gets an entry whose two interfaces are both LoRa, and link transport then
-  repeats every packet of it. Python RNS transport nodes never forward a
-  packet without a transport header. Showing it needs two LoRa endpoints
-  besides the node (the bench has one); the likely fix is to skip FWD-CHECK
-  when the outbound interface is the receiving one on a shared medium.
+- **A quiet backbone is re-dialled every 2 minutes.** The backbone
+  connection drops itself after 120 s without receiving anything
+  (`TCP_IF_READ_TIMEOUT`) and reconnects. Busy public backbones never go
+  quiet that long, but the bench stand-in does, and so could a small
+  community one; anything crossing at that moment is lost. Dead peers are
+  already caught by TCP keepalive on that socket (10 s idle, 3 probes 5 s
+  apart; lwIP has `LWIP_TCP_KEEPALIVE`), which is all Python RNS uses. A
+  different value would break DESIGN_PRINCIPLES.md §4; the choice is whether
+  to rely on keepalive alone — for James, as this area has had half-open
+  regressions before.
+- **The Prns peer dropped and did not come back** (2026-09-28 17:55):
+  `left (reason 0x208)` — an HCI connection timeout, the radio link to the
+  Mac silent — after 571 s, and prnsd had not reconnected minutes later
+  while the node advertised a free slot. The earlier prnsd stayed connected
+  for hours of tests. Not yet known whether the Mac, prnsd or the node.
 - **Whitelists are 200 entries with a linear search.** In use they no longer
   evict, but a LAN with more than 200 addresses active at once would push
   idle ones out, and the search cost grows with the cap. A set would allow a
@@ -212,3 +233,7 @@ All on `bench/instrumentation`, found by these suites:
 | 2026-09-28 | same | lan tcp,prnsd,lora | **20/20** | with single packets on every pair (3/3 arrived, 3/3 proved, LoRa included); LoRa echo RTT p50 7.8–9.8 s |
 | 2026-09-28 | + slow-pass lines (202ea41), TCP frame budget (f666ba6) | wan tcp,tcp2 | **18/18** | flood: LAN–LAN echo p50 262 ms (was ~300); LAN–WAN p50 ~860 ms, dominated by the WAN test agent processing the whole flood itself |
 | 2026-09-28 | f666ba6 | lan tcp,prnsd,lora | **20/20** | final regression |
+| 2026-09-28 | 935b9e6 | lora neighbour | FAIL | RTNode sent again a data packet, a link request and a link packet between direct neighbours |
+| 2026-09-28 | + 62747ca, ba3219e | lora neighbour | **PASS** | none repeated; no link entry made |
+| 2026-09-28 | same | lan tcp,prnsd,lora `--prnsd-gateway` | 22/24 | Bluetooth paths through prnsd pass (tcp→prnsd 0.45 s, prnsd→tcp 0.29 s, lora→prnsd 4.4 s); prnsd→lora held by prnsd's path gate after another agent's request (checks now use a fresh destination); lora→prnsd packets lost with the Prns peer, which dropped (0x208) |
+| 2026-09-28 | same | wan tcp,tcp2 | **18/18** | flood LAN–LAN echo p50 199 ms |
