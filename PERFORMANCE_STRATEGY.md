@@ -68,14 +68,14 @@ budget is renegotiated here, in writing.
 
 | Metric | Budget (proposed) | Baseline | Why this number |
 |---|---|---|---|
-| Min free internal heap, 30-min standard load | ≥ 48 KB | — | 20 KB above the 28 KB shed threshold |
-| Largest free internal block | ≥ 24 KB | — | WiFi RX and lwIP need contiguous buffers |
+| Min free internal heap, 30-min standard load | ≥ 48 KB | idle 198 KB; #43 flood **3.5 KB** | 20 KB above the 28 KB shed threshold |
+| Largest free internal block | ≥ 24 KB | idle 192 KB; flood 12.5 KB | WiFi RX and lwIP need contiguous buffers |
 | Static RAM (`.data` + `.bss`) | ≤ 25 % | 22.5 % | today plus Bluetooth tables |
-| Main-loop iteration, p99 / max | ≤ 5 ms / ≤ 50 ms | — | keeps TCP, LoRa RX and timers serviced |
-| Time `loop()` spends blocked in LoRa TX | 0 | — | rule 3 |
-| Flash writes per minute, standard load | ≤ 6 | — | each can stall both cores (rule 8) |
-| WiFi health under standard load | ICMP loss < 1 %, RTT p95 < 150 ms, 0 TCP link drops per 30 min | 30–55 % loss (#43) | the #43 reporter's measure |
-| Watchdog resets, 30-min soak | 0 | — | |
+| Main-loop iteration, p99 / max | ≤ 5 ms / ≤ 50 ms | idle ≤ 1 ms / 212 ms; flood ≤ 5 ms / **58.5 s** | keeps TCP, LoRa RX and timers serviced |
+| Time `loop()` spends blocked in LoRa TX | 0 | 1.6 s per 168-byte frame; 33 frames in one call under flood | rule 3 |
+| Flash writes per minute, standard load | ≤ 6 | idle 1 (`/time_offset`, 16–166 ms); flood up to 62 | each can stall both cores (rule 8) |
+| WiFi health under standard load | ICMP loss < 1 %, RTT p95 < 150 ms, 0 TCP link drops per 30 min | idle 0 %, p95 182 ms (modem sleep); flood **73 %**, WiFi wedged | the #43 reporter's measure |
+| Watchdog resets, 30-min soak | 0 | 0 in 5 min of flood, but one stall came within 1.5 s of the 60 s panic | |
 | LoRa airtime | within the configured airtime locks and regional duty cycle | — | |
 
 ## Instrumentation: every stall and drop reports itself
@@ -116,6 +116,56 @@ lives in `tests/` alongside the proof-probe harnesses.
 
 Host-side logic (codecs, parsers, the Bluetooth policy state machine) is
 unit-tested without a board by `tests/native/run.sh`.
+
+## Baseline, 2026-09-27
+
+Heltec V4.2 (GC1109 PA, 2 MB quad PSRAM), v1.0.50 plus the instrumentation
+(`bench/instrumentation` 60b1aad), bench overrides (backbones off, local TCP
+server on, TX power capped at 11 dBm effective). Raw output under
+`tests/bench-results/` (not in git).
+
+**Scenario A, idle, 10 min.** 0 % ping loss; RTT p50 97 ms, p95 182 ms, max
+293 ms — WiFi modem sleep, which nothing turns off. No loop stalls after boot.
+Internal heap steady at 204 KB free (min 198 KB).
+
+**Scenario B, #43 flood at 1 announce/s, 5 min.** Reproduces #43, worse:
+
+- **73 % ping loss, then none answered at all.** From +82 s the node stopped
+  answering ICMP and ARP (the Mac reported "Host is down") and was still
+  unreachable 2.5 min after the flood ended — while its own log reported
+  WiFi connected at −33 dBm and 120 KB free. The WiFi watchdog, which only
+  reacts to a disconnect, never fired. Only a reboot recovers it.
+- **The loop was blocked about 85 % of the time.** LoRa stalls grew as the
+  queue filled (1.8, 3.6, 8.9, 28, 35 s) up to 58.5 s for 33 frames in one
+  call — 1.5 s short of the task-watchdog panic. The queue overflowed
+  (20 drops).
+- **Flash bursts between them:** up to 54 cache writes and 10 s of flash in
+  one stall; 142 flash operations of 20 ms or more in 5 min.
+- **A TCP keepalive write blocked 10 s and failed**, dropping the flood client
+  (the reporter's "link DOWN").
+- **Internal heap fell from 204 KB to 3.5 KB** (largest block 12.5 KB) —
+  every Reticulum object is in internal RAM (next section). That, not the
+  blocked loop alone, is the likely cause of the wedge.
+
+**Smaller costs found on the way**
+
+- The display pushes a full frame over I2C about 6 times a second (~25 ms
+  each, ~17 % of the loop) even when blanked: `update_display()` clears and
+  pushes on every interval ([Display.h:1224](Display.h)).
+- `persist_data` rewrites `/time_offset` every minute: 16–166 ms with both
+  cores stalled.
+- One idle stall of 1.5 s had no instrumented cause; `[STALL]` now reports
+  unattributed time (`other=`) so the next one is visible.
+- Pre-existing bug: `boundary_nominal_path_table_maxpersist` is set from
+  `probe_destination_enabled()` ([RNode_Firmware.ino:1009](RNode_Firmware.ino)),
+  so restoring the cap after heap pressure would persist at most one path.
+
+**Bench note.** On this board's USB-Serial/JTAG port an RTS reset can leave
+the chip in the ROM bootloader — silent, off WiFi — and with a battery
+attached that survives every reset. esptool's `--after watchdog_reset`
+starts the app; if a board is truly stuck, disconnect battery and USB, hold
+PRG while reconnecting, and flash. The harness falls back to the watchdog
+reset.
 
 ## Issue #43: what the code says
 
@@ -197,8 +247,19 @@ no ~1.6 MB pool was ever taken.
 Consequence: every Reticulum object — paths, announces, links, packets —
 lives in the same internal SRAM that WiFi, lwIP and the watchdog thresholds
 depend on, and the V4's PSRAM sits idle. This changes every internal-heap
-number above. Confirm with a boot log line (step 1), then fix the init order
-so the pool is created once PSRAM is up (step 2).
+number above.
+
+**Confirmed on hardware** (`[RES] boot ... tlsf=off(malloc)` with 2 MB PSRAM
+present). **Step 2, first attempt** (`bench/instrumentation` fd548b9): creating
+the pool from `setup()` works — 1.6 MB taken from PSRAM — but TLSF then
+returns no block at all (every allocation fell back to `malloc`), which
+suggests `tlsf_add_pool()` fails; `tlsf_create_with_pool()` ignores that and
+prints the reason with `printf`, which does not reach the log. The pool has
+probably never worked on any board. Two findings for the fix: `operator
+delete` must route frees by address (blocks from before the pool must go to
+`free()`), and TLSF has no locking while `new` runs on several tasks.
+Diagnostic work is on the local branch `wip/tlsf-pool-debug` (do not flash);
+next is a standalone PSRAM + TLSF probe firmware, outside RTNode.
 
 ## Issue #44: octal PSRAM
 
@@ -308,4 +369,5 @@ Each step's results go in the log below before the next step starts.
 
 | Date | Firmware | Board | Scenario | Min heap | Loop p99 / max | Ping loss / p95 | Link drops | Notes |
 |---|---|---|---|---|---|---|---|---|
-| | | | | | | | | |
+| 2026-09-27 | v1.0.50 + inst (60b1aad) | V4.2 | A idle 10 min | 198 KB | ≤ 1 ms / 212 ms | 0 % / 182 ms | 0 | modem-sleep RTT; display ~6 pushes/s |
+| 2026-09-27 | v1.0.50 + inst (60b1aad) | V4.2 | B flood 1/s 5 min | 3.5 KB | ≤ 5 ms / 58.5 s | 73 % / — | 1 | WiFi wedged from +82 s until reboot; 20 LoRa queue drops |
