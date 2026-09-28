@@ -92,7 +92,12 @@ def main():
     args = parser.parse_args()
     results = {}
 
-    # The relay first: A's interface must be up before B announces.
+    # The relay first: A's interface must be up before B announces. End any
+    # session still running, so this one starts with this run's settings.
+    stopping = time.time()
+    with open(os.path.join(PEER_DIR, "control.json"), "w") as f:
+        json.dump({"mode": "off"}, f)
+    wait_for(lambda: any(e.get("event") in ("relay_down", "disconnected") for e in peer_events(stopping)), 10)
     started = time.time()
     with open(os.path.join(PEER_DIR, "control.json"), "w") as f:
         json.dump({"mode": "relay", "udp_in": UDP_IN, "udp_out": UDP_OUT, "chunk": args.chunk}, f)
@@ -160,7 +165,11 @@ def main():
                                      RNS.Destination.SINGLE, "rtnodebench", "ble", "b")
             link_started = time.time()
             link = RNS.Link(remote)
-            if wait_for(lambda: link.status == RNS.Link.ACTIVE, 20):
+            # The initiator marks a link active before it sends the RTT packet
+            # that completes it on B's side; data sent in between is dropped
+            # by B, so wait for B to report the link.
+            if wait_for(lambda: link.status == RNS.Link.ACTIVE and
+                        any(w and w[0] == "link" for _, w in b_lines), 20):
                 results["link_s"] = round(time.time() - link_started, 2)
                 echoed = []
                 link.set_packet_callback(lambda data, packet: echoed.append((time.time(), data)))
