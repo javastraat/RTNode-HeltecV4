@@ -404,8 +404,13 @@ int sx126x::begin(long frequency) {
 
       // CPS controls PA mode. Keep it HIGH permanently as long as the
       // radio is powered — toggling per-packet caused the LNA to misbehave.
-      pinMode(LORA_PA_CPS, OUTPUT);
-      digitalWrite(LORA_PA_CPS, HIGH);
+      #if defined(HELTEC_V4_R8)
+      if (!heltec_v4_r8())   // on an R8, GPIO46 is the LED
+      #endif
+      {
+        pinMode(LORA_PA_CPS, OUTPUT);
+        digitalWrite(LORA_PA_CPS, HIGH);
+      }
 
       // CTX is driven directly by SX1262 DIO2.
     } else if (lora_pa_model == LORA_PA_KCT8103L) {

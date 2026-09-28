@@ -1218,6 +1218,14 @@ void setup() {
       }
 
       res::boot_report();
+#if defined(HELTEC_V4_R8)
+      if (heltec_v4_r8()) {
+        Serial.printf("[R8] octal PSRAM running (%u KB): R8 pins, Vext GPIO40, LED GPIO46\r\n",
+                      (unsigned)(ESP.getPsramSize() / 1024));
+      } else {
+        Serial.write("[R8] no octal PSRAM: not an R8, or its PSRAM did not start; V4 pins\r\n");
+      }
+#endif
 
       // ── Startup LAN probe ──────────────────────────────────────────────
       // Send a path request for our own transport identity on LoRa to trigger
@@ -3264,6 +3272,9 @@ void sleep_now() {
       #if BOARD_MODEL == BOARD_HELTEC32_V4
           headless_led_off();
           headless_led_detach_pwm();
+          #if defined(HELTEC_V4_R8)
+          if (!heltec_v4_r8())   // on an R8, GPIO46 is the LED
+          #endif
           digitalWrite(LORA_PA_CPS, LOW);
           if (lora_pa_model == LORA_PA_KCT8103L) {
             // V4.3 KCT8103L: drop CTX so the FEM is in a known low state.

@@ -416,13 +416,29 @@
       #define PIN_WAKEUP GPIO_NUM_0
       #define WAKEUP_LEVEL 0
       #define OCP_TUNED 0x18
-      #define Vext GPIO_NUM_36
+
+      #if defined(HELTEC_V4_R8)
+        // V4 R8 (ESP32-S3R8, 8 MB octal PSRAM; build rtnode_heltec_v4_r8):
+        // the octal PSRAM takes GPIO33-37, so Heltec moved Vext to GPIO40 and
+        // the LED to GPIO46, and dropped the battery divider's control pin.
+        // This build picks those only once its octal PSRAM is running: on a
+        // 2 MB V4 flashed with it by mistake the PSRAM does not start,
+        // GPIO33-37 are free, and the V4 pins below apply.
+        #include <Esp.h>
+        inline bool heltec_v4_r8() { return ESP.getPsramSize() > 0; }
+        #define Vext (heltec_v4_r8() ? GPIO_NUM_40 : GPIO_NUM_36)
+      #else
+        #define Vext GPIO_NUM_36
+      #endif
 
       const int pin_btn_usr1 = 0;
 
       #if defined(EXTERNAL_LEDS)
         const int pin_led_rx = 13;
         const int pin_led_tx = 14;
+      #elif defined(HELTEC_V4_R8)
+        #define pin_led_rx (heltec_v4_r8() ? 46 : 35)
+        #define pin_led_tx (heltec_v4_r8() ? 46 : 35)
       #else
         const int pin_led_rx = 35;
         const int pin_led_tx = 35;
@@ -441,7 +457,8 @@
       #define LORA_LNA_KCT8103L_GAIN 21  // KCT8103L (V4.3)
       #define LORA_LNA_GVT   12
 
-      // V4.2 (GC1109) and V4.3 (KCT8103L) FEM share these pins.
+      // V4.2 (GC1109) and V4.3 (KCT8103L) FEM share these pins; so does the
+      // V4 R8, a KCT8103L board (its GPIO46 is the LED, never CPS).
       // FEM type is auto-detected at runtime in sx126x.cpp via the GPIO2
       // (CSD) default pull level: GC1109 → LOW, KCT8103L → HIGH.
       //   GC1109   : CSD=GPIO2 (enable, HIGH), CPS=GPIO46 (PA mode)

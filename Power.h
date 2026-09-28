@@ -436,6 +436,10 @@ bool init_pmu() {
     digitalWrite(pin_ctrl, pin_ctrl_active);
     return true;
   #elif BOARD_MODEL == BOARD_HELTEC32_V4
+    #if defined(HELTEC_V4_R8)
+      // The R8's divider is always connected; GPIO37 is its octal PSRAM.
+      if (heltec_v4_r8()) return true;
+    #endif
     pinMode(pin_ctrl,OUTPUT);
     digitalWrite(pin_ctrl, HIGH);
     return true;
