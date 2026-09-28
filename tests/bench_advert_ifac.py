@@ -14,9 +14,9 @@ passphrase.
     # built with PLATFORMIO_BUILD_FLAGS=-DRTNODE_BENCH_PUBLISH_IFAC=1:
     ../.venv/bin/python tests/bench_advert_ifac.py ... --expect present
 
-The first advert goes out about 60 s after boot. The handler accepts RTNode's
-stamp value (14); the test reports whether a default 1.5.2 node, which
-requires 16, would.
+The first advert goes out about 60 s after boot. The handler requires stamp
+value 16, as a default 1.5.2 node does. The test also fails if making the
+stamp stalls the node's main loop ([STALL], 250 ms or more).
 """
 import argparse
 import os
@@ -31,7 +31,6 @@ from bench_load import HERE, start_bench_node  # noqa: E402
 
 NETNAME = "rtnode-bench"                 # RNode_Firmware.ino, RTNODE_BENCH_ADVERT
 PASSPHRASE = "bench-only-not-secret"
-RTNODE_STAMP_VALUE = 14                  # Advertise.h ADV_DEFAULT_STAMP_COST
 DEFAULT_REQUIRED_VALUE = 16              # RNS 1.5.2 InterfaceAnnouncer.DEFAULT_STAMP_VALUE
 ADVERT_WITHIN = 180                      # s after boot: 60 s delay, then the stamp
 
@@ -81,34 +80,53 @@ def main():
 
     adverts = []
     heard = threading.Event()
+    arrived = []  # any discovery announce, whatever its stamp
 
     def discovered(info):
         adverts.append(info)
         heard.set()
 
+    class Arrivals:
+        aspect_filter = "rnstransport.discovery.interface"
+
+        def received_announce(self, destination_hash, announced_identity, app_data):
+            arrived.append(time.time())
+
     work = tempfile.mkdtemp(prefix="rtnode-advert-ifac-")
     write_config(os.path.join(work, "listener"), args.host, args.port)
     RNS.Reticulum(os.path.join(work, "listener"))
     RNS.Transport.register_announce_handler(
-        InterfaceAnnounceHandler(required_value=RTNODE_STAMP_VALUE, callback=discovered))
+        InterfaceAnnounceHandler(required_value=DEFAULT_REQUIRED_VALUE, callback=discovered))
+    RNS.Transport.register_announce_handler(Arrivals())
 
     if not heard.wait(timeout=max(1, boot + ADVERT_WITHIN - time.time())):
-        print(f"FAIL: no advert within {ADVERT_WITHIN} s of boot", flush=True)
+        if arrived:
+            print(f"FAIL: the advert arrived but a default 1.5.2 node ignores it "
+                  f"(stamp value under {DEFAULT_REQUIRED_VALUE})", flush=True)
+        else:
+            print(f"FAIL: no advert within {ADVERT_WITHIN} s of boot", flush=True)
         os._exit(1)
     info = adverts[0]
     print(f"advert {time.time() - boot:.0f} s after boot: name {info.get('name')!r}, "
-          f"stamp value {info.get('value')} ({'accepted' if info.get('value', 0) >= DEFAULT_REQUIRED_VALUE else 'ignored'} "
-          f"by a default 1.5.2 node, which requires {DEFAULT_REQUIRED_VALUE})", flush=True)
+          f"stamp value {info.get('value')}, accepted by a default 1.5.2 node", flush=True)
 
-    # How long the stamp held up the main loop, from the node's own marks.
+    # What making the stamp cost the node, from its own marks.
     time.sleep(1)
     with capture.lock:
         lines = list(capture.lines)
     start = next((t for t, text in lines if "[Advertise] Generating workblock" in text), None)
-    stalls = [int(m.group(1)) for t, text in lines
-              if start and t >= start and (m := re.search(r"\[STALL\] t=\d+ (\d+)ms", text))]
+    sent = next((t for t, text in lines if "[Advertise] Sending interface discovery announce" in text), None)
+    stall_failure = None
     if start:
-        print(f"stamp generated on the node; longest loop stall after it: {max(stalls) if stalls else 0} ms", flush=True)
+        found = next((m for _, text in lines if (m := re.search(r"Stamp found after (\d+) attempts in (\d+) ms", text))), None)
+        stalls = [int(m.group(1)) for t, text in lines
+                  if start <= t <= (sent or time.time()) and (m := re.search(r"\[STALL\] t=\d+ (\d+)ms", text))]
+        if found:
+            print(f"stamp made on the node: {found.group(1)} attempts, {found.group(2)} ms", flush=True)
+        if stalls:
+            stall_failure = f"main loop stalled {max(stalls)} ms while the stamp was made"
+        else:
+            print("no main-loop stall while the stamp was made", flush=True)
     else:
         print("stamp reused from the node's cache", flush=True)
 
@@ -121,6 +139,9 @@ def main():
         verdict = ("advert carries the IFAC name and passphrase, as asked" if ok
                    else f"expected the test credentials, got name {netname!r}, key {'set' if netkey else 'absent'}")
     print(("PASS: " if ok else "FAIL: ") + verdict, flush=True)
+    if stall_failure:
+        ok = False
+        print("FAIL: " + stall_failure, flush=True)
     capture.stop.set()
     capture.join(timeout=5)
     print(f"results: {out}", flush=True)
