@@ -282,18 +282,20 @@ namespace RNS {
 		};
 
 		// CBA TODO Analyze safety of using Inrerface references here
+		// A path request forwarded on behalf of others (Python's
+		// discovery_path_requests): who is waiting for the answer, until when.
 		class PathRequestEntry {
 		public:
 			PathRequestEntry(const Bytes& destination_hash, double timeout, const Interface& requesting_interface) :
 				_destination_hash(destination_hash),
 				_timeout(timeout),
-				_requesting_interface(requesting_interface)
+				_requesting_interfaces{requesting_interface}
 			{
 			}
 		public:
 			Bytes _destination_hash;
 			double _timeout = 0;
-			Interface _requesting_interface = {Type::NONE};
+			std::vector<Interface> _requesting_interfaces;
 		};
 
 /*
@@ -371,6 +373,9 @@ namespace RNS {
 		// slot): forget the paths, links and reverse entries through it, as
 		// Python RNS does for a detached spawned interface. Returns how many.
 		static size_t forget_interface_routes(const Interface& interface);
+		// An accepted announce answers any path request we forwarded for its
+		// destination: send it as a path response on each asker's interface.
+		static void answer_waiting_path_requests(const Packet& packet);
 		static void register_local_client_interface(Interface& interface);
 		inline static const std::map<Bytes, Interface&> get_interfaces() { return _interfaces; }
 		static void register_destination(Destination& destination);

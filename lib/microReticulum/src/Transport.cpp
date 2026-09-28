@@ -2605,6 +2605,10 @@ static uint32_t ingress_dropped = 0;
 						}
 
 						DEBUG("Destination " + packet.destination_hash().toHex() + " is now " + std::to_string(announce_hops) + " hops away via " + received_from.toHex() + " on " + packet.receiving_interface().toString());
+
+						// Anyone whose path request we forwarded gets the
+						// answer now (Python 1.5.2 Transport._inbound).
+						answer_waiting_path_requests(packet);
 						DEBUG("DIAG: STORED path " + packet.destination_hash().toHex().substr(0,8) + " hops=" + std::to_string(announce_hops) + " iface=" + packet.receiving_interface().toString());
 
 						//TRACE("Transport::inbound: Destination " + packet.destination_hash().toHex() + " has data: " + packet.data().toHex());
@@ -3010,6 +3014,32 @@ static uint32_t ingress_dropped = 0;
 	interface.is_local_client(true);
 	interface.is_backbone(false);
 	TRACE("Transport: Registered trusted local client interface " + interface.toString());
+}
+
+/*static*/ void Transport::answer_waiting_path_requests(const Packet& packet) {
+	auto waiting = flatmap_find(_discovery_path_requests, packet.destination_hash());
+	if (waiting == _discovery_path_requests.end()) return;
+	std::vector<Interface> askers = waiting->second._requesting_interfaces;
+	_discovery_path_requests.erase(waiting);
+	Identity announce_identity(Identity::recall(packet.destination_hash()));
+	Destination announce_destination(announce_identity, Type::Destination::OUT, Type::Destination::SINGLE, packet.destination_hash());
+	for (const Interface& asker : askers) {
+		NOTICE("PATH-ANSWER - " + packet.destination_hash().toHex().substr(0,8) + " to " + asker.toString() + " (waiting request)");
+		Packet answer(
+			announce_destination,
+			asker,
+			packet.data(),
+			Type::Packet::ANNOUNCE,
+			Type::Packet::PATH_RESPONSE,
+			Type::Transport::TRANSPORT,
+			Type::Packet::HEADER_2,
+			_identity.hash(),
+			true,
+			packet.context_flag()
+		);
+		answer.hops(packet.hops());
+		answer.send();
+	}
 }
 
 /*static*/ size_t Transport::forget_interface_routes(const Interface& interface) {
@@ -3839,7 +3869,13 @@ will announce it.
 		}
 	else if (should_search_for_unknown) {
 		TRACE("Transport::path_request_handler: searching for unknown path to " + destination_hash.toHex());
-		if (flatmap_find(_discovery_path_requests, destination_hash) != _discovery_path_requests.end()) {
+		auto waiting = flatmap_find(_discovery_path_requests, destination_hash);
+		if (waiting != _discovery_path_requests.end()) {
+			// Python batches a new asker onto the waiting request.
+			auto& askers = waiting->second._requesting_interfaces;
+			if (std::find(askers.begin(), askers.end(), attached_interface) == askers.end()) {
+				askers.push_back(attached_interface);
+			}
 			DEBUG("There is already a waiting path request for destination " + destination_hash.toHex() + " on behalf of path request" + interface_str);
 		}
 		else {
@@ -3871,6 +3907,15 @@ will announce it.
 					TRACE("Transport::path_request: requesting path on interface " + interface.toString());
 					request_path(destination_hash, interface, tag, true);
 				}
+			}
+
+			// Remember who asked, so the answer goes back to them when it
+			// arrives (Python's discovery_path_requests). Entries expire
+			// after PATH_REQUEST_TIMEOUT; the table is capped against floods.
+			static const size_t MAX_DISCOVERY_PATH_REQUESTS = 64;
+			if (attached_interface && _discovery_path_requests.size() < MAX_DISCOVERY_PATH_REQUESTS) {
+				_discovery_path_requests.push_back({destination_hash,
+					PathRequestEntry(destination_hash, OS::time() + Type::Transport::PATH_REQUEST_TIMEOUT, attached_interface)});
 			}
 		}
 	}
