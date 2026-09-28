@@ -15,7 +15,8 @@
 //
 //  Columba (ble-reticulum v2.2, 07d9413, as pinned by Columba 2.2.6): a
 //  central's first write of exactly 16 bytes to RX is its identity; a 1-byte
-//  0x00 write is a keepalive. Prns (d48e9fc, prns-core bluetooth_auto): the
+//  0x00 is a keepalive, and both sides send one every 15 s when idle —
+//  Columba 1.x (reticulum-kt) drops a peer it has heard nothing from for 45 s. Prns (d48e9fc, prns-core bluetooth_auto): the
 //  central writes a 23-byte Hello to CTL — [01][identity 16][endpoint 2]
 //  [L2CAP PSM][link MTU u16 BE][RSSI] — and we answer Welcome ([02], ours)
 //  by notification, or Close [03][reason] if it is our own identity. A
@@ -86,6 +87,7 @@ static const int      SLOTS         = CONFIG_BT_NIMBLE_MAX_CONNECTIONS;
 static const int      TX_DEPTH      = 8;     // packets queued per slot
 static const int      CONTROL_DEPTH = 32;
 static const int      WRITE_DEPTH   = 16;
+static const uint32_t KEEPALIVE_EVERY_MS = 15000;   // Columba's CONNECTION_KEEPALIVE_INTERVAL_MS
 static const uint16_t ADV_INTERVAL_MIN = 160;   // 100 ms, in 0.625 ms units
 static const uint16_t ADV_INTERVAL_MAX = 240;   // 150 ms
 // v0.3.0 manufacturer data: company 0xFFFF (little-endian), version 3, flags.
@@ -134,6 +136,7 @@ public:
     uint16_t att_mtu = 23;
     uint8_t  identity[IDENTITY_LEN] = {};
     uint32_t connected_ms = 0;
+    uint32_t last_sent_ms = 0;   // last notification queued to this peer
 
     // Reassembly of the fragments the peer writes.
     uint8_t  rx[PACKET_MAX];
@@ -150,6 +153,7 @@ public:
     uint32_t rx_packets = 0, rx_bytes = 0, tx_packets = 0, tx_bytes = 0;
     uint32_t tx_drops = 0, bad_fragments = 0, keepalives = 0, before_identity = 0;
     uint32_t enomem = 0, notify_errors = 0, peers = 0, prns_peers = 0, bad_control = 0;
+    uint32_t keepalives_sent = 0;
 
     void attach(uint16_t handle) {
         used = true;
@@ -177,6 +181,7 @@ public:
     void set_online(Protocol which) {
         identified = true;
         protocol = which;
+        last_sent_ms = millis();
         _online = true;
         peers++;
         if (which == PROTOCOL_PRNS) prns_peers++;
@@ -580,6 +585,7 @@ static void send_next_fragment(BlePeerInterface* slot) {
         slot->tx_count--;
         return;
     }
+    slot->last_sent_ms = millis();
     slot->tx_seq++;
     if (slot->tx_seq == slot->tx_total) {
         slot->tx_packets++;
@@ -599,7 +605,7 @@ static void report() {
         BlePeerInterface* s = slots[i];
         if (!s->used && s->peers == 0) continue;
         Serial.printf("[BLE]   %s %s %s peer %s mtu %u peers %lu (prns %lu) rx %lu/%lu tx %lu/%lu queued %u "
-                      "drops %lu bad %lu/%lu keepalive %lu early %lu enomem %lu errors %lu\r\n",
+                      "drops %lu bad %lu/%lu keepalive in/out %lu/%lu early %lu enomem %lu errors %lu\r\n",
                       s->label().c_str(), s->used ? (s->identified ? "up" : "joining") : "free",
                       s->identified ? (s->protocol == BlePeerInterface::PROTOCOL_PRNS ? "prns" : "columba") : "-",
                       s->identified ? short_identity(s->identity).c_str() : "-", (unsigned)s->att_mtu,
@@ -607,7 +613,7 @@ static void report() {
                       (unsigned long)s->rx_packets, (unsigned long)s->rx_bytes,
                       (unsigned long)s->tx_packets, (unsigned long)s->tx_bytes, (unsigned)s->tx_count,
                       (unsigned long)s->tx_drops, (unsigned long)s->bad_fragments, (unsigned long)s->bad_control,
-                      (unsigned long)s->keepalives, (unsigned long)s->before_identity,
+                      (unsigned long)s->keepalives, (unsigned long)s->keepalives_sent, (unsigned long)s->before_identity,
                       (unsigned long)s->enomem, (unsigned long)s->notify_errors);
     }
 }
@@ -628,9 +634,21 @@ inline void loop() {
     for (int i = 0; i < 4 && xQueueReceive(write_queue, &loop_write, 0) == pdTRUE; i++) {
         on_write(loop_write);
     }
+    uint32_t now_ms = millis();
     for (int i = 0; i < SLOTS; i++) {
         BlePeerInterface* slot = slots[i];
-        if (slot->used && slot->identified && slot->tx_count > 0) send_next_fragment(slot);
+        if (!slot->used || !slot->identified) continue;
+        if (slot->tx_count > 0) {
+            send_next_fragment(slot);
+        }
+        else if (slot->protocol == BlePeerInterface::PROTOCOL_COLUMBA &&
+                 now_ms - slot->last_sent_ms >= KEEPALIVE_EVERY_MS) {
+            static const uint8_t keepalive = 0x00;
+            if (notify(slot->conn, tx_char, &keepalive, 1)) {
+                slot->keepalives_sent++;
+                slot->last_sent_ms = now_ms;
+            }
+        }
     }
 
     uint32_t now = millis();
