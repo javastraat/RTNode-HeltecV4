@@ -119,26 +119,38 @@ void Reticulum::loop() {
 	assert(_object);
 	if (!_object->_is_connected_to_shared_instance) {
 
+		// One [RLOOP] line when a pass takes 100 ms or more, by part.
+		const uint32_t t0 = micros();
+
 		// Perform Reticulum housekeeping
 		if (OS::time() > (_object->_jobs_last_run + JOB_INTERVAL)) {
 			jobs();
 			_object->_jobs_last_run = OS::time();
 		}
+		const uint32_t t_jobs = micros();
 
 		// Perform interface processing
 		for (auto& [hash, interface] : Transport::get_interfaces()) {
 			interface.loop();
 		}
+		const uint32_t t_ifaces = micros();
 
 		// Perform Filesystem processing
 		FileSystem& filesystem = OS::get_filesystem();
 		if (filesystem) {
 			filesystem.loop();
 		}
-
+		const uint32_t t_fs = micros();
 
 		// Perform Transport processing
 		RNS::Transport::loop();
+		const uint32_t t_end = micros();
+		if (t_end - t0 >= 100000) {
+			Serial.printf("[RLOOP] t=%lu %lums jobs=%lu interfaces=%lu fs=%lu transport=%lu\r\n",
+			              (unsigned long)millis(), (unsigned long)((t_end - t0) / 1000),
+			              (unsigned long)((t_jobs - t0) / 1000), (unsigned long)((t_ifaces - t_jobs) / 1000),
+			              (unsigned long)((t_fs - t_ifaces) / 1000), (unsigned long)((t_end - t_fs) / 1000));
+		}
 	}
 	// Perform random number gnerator housekeeping
 	RNG.loop();
@@ -165,13 +177,23 @@ void Reticulum::jobs() {
 	}
 #endif
 
+	// One [RJOBS] line when either takes 50 ms or more.
+	uint32_t clean_us = 0, persist_us = 0;
 	if (now > _object->_last_cache_clean + CLEAN_INTERVAL) {
+		uint32_t start = micros();
 		clean_caches();
+		clean_us = micros() - start;
 		_object->_last_cache_clean = OS::time();
 	}
 
 	if (now > _object->_last_data_persist + PERSIST_INTERVAL) {
+		uint32_t start = micros();
 		persist_data();
+		persist_us = micros() - start;
+	}
+	if (clean_us >= 50000 || persist_us >= 50000) {
+		Serial.printf("[RJOBS] t=%lu clean=%lums persist=%lums\r\n", (unsigned long)millis(),
+		              (unsigned long)(clean_us / 1000), (unsigned long)(persist_us / 1000));
 	}
 }
 

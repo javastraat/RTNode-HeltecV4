@@ -100,8 +100,9 @@ airtime; the two LoRa flows keep the channel about a quarter busy.
   until an answer comes or `PATH_REQUEST_GATE_TIMEOUT` (45 s) passes. LAN
   path requests reach the stand-in too (LAN packets go everywhere) and the
   node answers only the LAN requester, so a WAN request for the same
-  destination within 45 s never reaches the node. `wan-path-mentioned` waits
-  out the gate.
+  destination within 45 s — up to 50 s, as the gate entry goes at the next
+  5-second table cull — never reaches the node. `wan-path-mentioned` waits
+  55 s.
 - **LoRa is half duplex.** A step that starts while the last one's frames
   (a link close, a late proof) are still on air collides with them. The
   harness leaves `--lora-settle` (5 s) of quiet after each LoRa step; a lost
@@ -160,8 +161,19 @@ All on `bench/instrumentation`, found by these suites:
   - under a 20/s WAN announce flood, receive processing is ~3 ms per packet
     and the loop's p50 LAN → WAN echo RTT rises from ~200 ms to ~750 ms.
   Nothing is lost and the soak passes, but the loop is far over its 50 ms
-  budget. The next step is splitting `jobs` into interface polling and
-  Transport jobs, and asking whether the display needs 6 pushes a second.
+  budget. Slow passes now say where they went — `[RLOOP]` (a
+  `reticulum.loop()` pass of 100 ms or more: housekeeping, interface loops,
+  filesystem, Transport), `[JOBS]` (a Transport jobs run of 100 ms or more,
+  by section) and `[RJOBS]` (cache clean or persist of 50 ms or more) — and
+  under the WAN suite they show three things:
+  - the TCP interfaces process a whole burst of received packets in one
+    pass (up to 360 ms under the flood) while the other radios wait; a
+    per-pass budget in `TcpInterface::loop()` would bound that;
+  - releasing one held announce costs ~100 ms (verification and path work),
+    every 5 s during a burst;
+  - the once-a-minute stall is `persist_data()` (0.3–1.2 s) plus cache clean
+    (up to 0.2 s) plus the table cull (0.1–0.17 s).
+  The display question stands too: does it need 6 pushes a second?
 - **Direct LoRa neighbours may be repeated (code review, untested).**
   FWD-CHECK (firewall mode, from v1.0.41 like fixes 1, 2 and 6) forwards a
   LAN packet that has no transport header whenever the node has a path to

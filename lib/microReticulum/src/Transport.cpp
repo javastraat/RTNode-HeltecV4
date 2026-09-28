@@ -477,6 +477,11 @@ static uint32_t ingress_dropped = 0;
 	int count;
 	_jobs_running = true;
 
+	// Where a slow run goes: one [JOBS] line when a run takes 100 ms or more.
+	const uint32_t jobs_t0 = micros();
+	uint32_t jobs_t_links = jobs_t0, jobs_t_receipts = jobs_t0, jobs_t_announces = jobs_t0, jobs_t_culls = jobs_t0;
+	uint16_t jobs_retransmitted = 0;
+
 	try {
 		if (!_jobs_locked) {
 
@@ -533,6 +538,8 @@ static uint32_t ingress_dropped = 0;
 				_links_last_checked = OS::time();
 			}
 
+			jobs_t_links = micros();
+
 			// Process receipts list for timed-out packets
 			if (OS::time() > (_receipts_last_checked + _receipts_check_interval)) {
 				while (_receipts.size() > Type::Transport::MAX_RECEIPTS) {
@@ -556,6 +563,8 @@ static uint32_t ingress_dropped = 0;
 
 				_receipts_last_checked = OS::time();
 			}
+
+			jobs_t_receipts = micros();
 
 			// Process announces needing retransmission
 			if (OS::time() > (_announces_last_checked + _announces_check_interval)) {
@@ -584,6 +593,7 @@ static uint32_t ingress_dropped = 0;
 							TRACE("Performing announce processing for " + destination_hash.toHex() + "...");
 							announce_entry._retransmit_timeout = OS::time() + Type::Transport::PATHFINDER_G + Type::Transport::PATHFINDER_RW;
 							announce_entry._retries += 1;
+							++jobs_retransmitted;
 							Type::Packet::context_types announce_context = Type::Packet::CONTEXT_NONE;
 							if (announce_entry._block_rebroadcasts) {
 								announce_context = Type::Packet::PATH_RESPONSE;
@@ -652,6 +662,8 @@ static uint32_t ingress_dropped = 0;
 				_announces_last_checked = OS::time();
 			}
 
+			jobs_t_announces = micros();
+
 			// Cull held announces that are older than 60 seconds or if map exceeds cap
 			{
 				const double held_timeout = 60.0;
@@ -697,6 +709,8 @@ static uint32_t ingress_dropped = 0;
 				std::advance(iter, _discovery_pr_tags.size() - _max_pr_tags);
 				_discovery_pr_tags.erase(_discovery_pr_tags.begin(), iter);
 			}
+
+			jobs_t_culls = micros();
 
 			if (OS::time() > (_tables_last_culled + _tables_cull_interval)) {
 
@@ -909,6 +923,19 @@ static uint32_t ingress_dropped = 0;
 	}
 
 	_jobs_running = false;
+
+	{
+		const uint32_t jobs_t_end = micros();
+		if (jobs_t_end - jobs_t0 >= 100000 && jobs_t_culls != jobs_t0) {
+			Serial.printf("[JOBS] t=%lu %lums links=%lu receipts=%lu announces=%lu/%u culls=%lu tables=%lu\r\n",
+			              (unsigned long)millis(), (unsigned long)((jobs_t_end - jobs_t0) / 1000),
+			              (unsigned long)((jobs_t_links - jobs_t0) / 1000),
+			              (unsigned long)((jobs_t_receipts - jobs_t_links) / 1000),
+			              (unsigned long)((jobs_t_announces - jobs_t_receipts) / 1000), (unsigned)jobs_retransmitted,
+			              (unsigned long)((jobs_t_culls - jobs_t_announces) / 1000),
+			              (unsigned long)((jobs_t_end - jobs_t_culls) / 1000));
+		}
+	}
 
 	// Heap telemetry: snapshot at jobs exit (MUTED)
 	// {

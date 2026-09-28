@@ -350,7 +350,8 @@ def wan(args):
             # go everywhere), so the WAN side asks later: a transport node
             # holds repeat requests for one destination for 45 s (RNS
             # PATH_REQUEST_GATE_TIMEOUT), and the node answers only the LAN
-            # requester, so the stand-in's gate stays shut until then.
+            # requester, so the stand-in's gate stays shut until then (45 s,
+            # plus up to one 5 s cull).
             path = a.call("path", 60, cmd="path", dest=b.silent, timeout=wait_s(a, b))
             record("lan-path-lan", a, b, path and path["ok"], s=path.get("s") if path else None)
             mentioned_at = time.time()
@@ -362,7 +363,9 @@ def wan(args):
         packet_check(record, "wan-packet-lan", w, a, args)
 
         if mentioned_at:
-            time.sleep(max(0, mentioned_at + 47 - time.time()))
+            # The gate entry goes at the stand-in's next table cull after
+            # 45 s, and it culls every 5 s (RNS tables_cull_interval).
+            time.sleep(max(0, mentioned_at + 55 - time.time()))
             path = w.call("path", 60, cmd="path", dest=b.silent, timeout=15)
             record("wan-path-mentioned", w, b, path and path["ok"], s=path.get("s") if path else None,
                    hops=path.get("hops") if path else None)
