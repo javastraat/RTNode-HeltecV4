@@ -11,7 +11,7 @@
 //    RX  …e5   write          Columba: central → us, identity then fragments
 //    ID  …e6   read           Columba: our 16-byte transport identity hash
 //    CTL …e7   write, notify  Prns: Hello → Welcome (or Close)
-//    DAT …e8   write, notify  Prns: fragments, both ways
+//    DAT …e8   write, write without response, notify  Prns: fragments, both ways
 //
 //  Columba (ble-reticulum v2.2, 07d9413, as pinned by Columba 2.2.6): a
 //  central's first write of exactly 16 bytes to RX is its identity; a 1-byte
@@ -33,10 +33,26 @@
 //
 //  NimBLE runs its host in its own task on core 0. Its callbacks only copy
 //  what happened into queues allocated at boot; loop() does everything else.
-//  Outgoing fragments go out as notifications from loop(), one per slot per
-//  pass. When NimBLE is out of buffers (ENOMEM) the fragment waits for the
-//  next pass: that is the only backpressure signal NimBLE 1.4 gives for
+//  A write that finds the write queue full waits in the host task until
+//  loop() makes room, and nothing is dropped: while it waits, NimBLE takes
+//  no more data from the controller, the controller holds the phone's next
+//  packets back, and the phone's own flow control pauses its writes. NimBLE
+//  holds no lock while it runs a write callback, and loop()'s own NimBLE
+//  calls never wait for the host task. Outgoing fragments go out as
+//  notifications from loop(), up to FRAGMENTS_PER_PASS per slot per pass.
+//  When NimBLE is out of buffers (ENOMEM) the fragment waits for the next
+//  pass: that is the only backpressure signal NimBLE 1.4 gives for
 //  notifications, and each occurrence is counted.
+//
+//  Link speed. Once a peer is identified we ask for the fastest link it
+//  will take:
+//    - the largest link-layer packets (251 bytes; a 500-byte packet then
+//      crosses in 2-3 air packets instead of 19);
+//    - the 2M PHY (Bluetooth 5 phones; a 4.2 phone stays on 1M);
+//    - 15 ms connection events, the shortest Apple accepts from an accessory.
+//  The phone decides; each outcome is logged. Prns writes may come with or
+//  without response on DAT: a phone that sends without response puts
+//  several fragments in one connection event instead of one per round trip.
 // ─────────────────────────────────────────────────────────────────────────────
 #ifndef BLE_INTERFACE_H
 #define BLE_INTERFACE_H
@@ -85,9 +101,26 @@ static const size_t   IDENTITY_LEN  = 16;
 static const size_t   VALUE_MAX     = 512;   // largest attribute value
 static const uint16_t PACKET_MAX    = 512;   // Reticulum packets are ≤ 500
 static const int      SLOTS         = CONFIG_BT_NIMBLE_MAX_CONNECTIONS;
-static const int      TX_DEPTH      = 8;     // packets queued per slot
+// Packets queued per slot: more than RNS's largest Resource window (75
+// parts, Resource.WINDOW_MAX_FAST), which can arrive from the backbone far
+// faster than Bluetooth carries it. In PSRAM, 49 KB per slot.
+static const int      TX_DEPTH      = 96;
 static const int      CONTROL_DEPTH = 32;
-static const int      WRITE_DEPTH   = 16;
+static const int      WRITE_DEPTH   = 128;   // in PSRAM, 66 KB
+static const int      WRITES_PER_PASS    = 32;
+static const int      FRAGMENTS_PER_PASS = 8;    // per slot
+// Link parameters asked of each identified peer. Apple's Accessory Design
+// Guidelines, "Connection Parameters": the interval a multiple of 15 ms
+// (min == max == 15 ms allowed), and a supervision timeout of 2-6 s.
+static const uint16_t FAST_INTERVAL = 12;    // 15 ms, in 1.25 ms units
+// Asks for it: at identification, and once more if the phone slows the link
+// again afterwards (Android returns to its own 45 ms default when service
+// discovery ends). Past that the phone has decided.
+static const uint8_t  FAST_ASKS_MAX = 2;
+static const uint16_t TIMEOUT_MIN   = 200;   // 2 s, in 10 ms units
+static const uint16_t TIMEOUT_MAX   = 600;   // 6 s
+static const uint16_t LL_OCTETS_MAX = 251;   // Data Length Extension's largest payload
+static const uint16_t LL_TIME_MAX   = 2120;  // µs for 251 octets on the 1M PHY
 static const uint32_t KEEPALIVE_EVERY_MS = 15000;   // Columba's CONNECTION_KEEPALIVE_INTERVAL_MS
 static const uint16_t ADV_INTERVAL_MIN = 160;   // 100 ms, in 0.625 ms units
 static const uint16_t ADV_INTERVAL_MAX = 240;   // 150 ms
@@ -95,11 +128,12 @@ static const uint16_t ADV_INTERVAL_MAX = 240;   // 150 ms
 static const uint8_t  ADV_FLAG_PERIPHERAL_ONLY = 0x01;
 
 // ─── Events from the NimBLE host task ────────────────────────────────────────
-enum ControlKind : uint8_t { CONTROL_CONNECT, CONTROL_DISCONNECT, CONTROL_MTU };
+enum ControlKind : uint8_t { CONTROL_CONNECT, CONTROL_DISCONNECT, CONTROL_MTU, CONTROL_PARAMS, CONTROL_PHY };
 struct ControlEvent {
     uint8_t  kind;
     uint16_t conn;
-    uint16_t value;    // MTU, or disconnect reason
+    uint16_t value;    // MTU, disconnect reason, or PHYs (TX << 8 | RX)
+    int16_t  status;   // of a connection parameter or PHY update
 };
 enum Channel : uint8_t { CHANNEL_COLUMBA_RX, CHANNEL_CONTROL, CHANNEL_DATA };
 struct WriteEvent {
@@ -113,8 +147,9 @@ static QueueHandle_t control_queue = nullptr;
 static QueueHandle_t write_queue   = nullptr;
 static WriteEvent    host_write;     // NimBLE host task only
 static WriteEvent    loop_write;     // loop() only
-// Written by the host task; read by loop().
-static volatile uint32_t control_drops = 0, write_drops = 0;
+// Written by the host task; read by loop(). A write wait is a write that
+// found the write queue full and waited for room.
+static volatile uint32_t control_drops = 0, write_waits = 0;
 
 // ─── A slot: one peer, one Reticulum interface ──────────────────────────────
 class BlePeerInterface : public RNS::InterfaceImpl {
@@ -135,6 +170,12 @@ public:
     Protocol protocol = PROTOCOL_COLUMBA;
     uint16_t conn = 0;
     uint16_t att_mtu = 23;
+    uint16_t interval = 0;        // connection interval, 1.25 ms units
+    uint16_t latency = 0;
+    uint16_t timeout = 0;         // supervision timeout, 10 ms units
+    uint8_t  tx_phy = 1, rx_phy = 1;
+    uint8_t  fast_asks = 0;       // 15 ms intervals asked for on this connection
+    bool     fast_refused = false;
     uint8_t  identity[IDENTITY_LEN] = {};
     uint32_t connected_ms = 0;
     uint32_t last_sent_ms = 0;   // last notification queued to this peer
@@ -144,9 +185,10 @@ public:
     uint16_t rx_len = 0, rx_total = 0, rx_next = 0;
     bool     rx_active = false;
 
-    // Packets waiting to go out, and how far the first one has got.
+    // Packets waiting to go out (TX_DEPTH of them, in PSRAM, from start()),
+    // and how far the first one has got.
     struct Packet { uint16_t len; uint8_t data[PACKET_MAX]; };
-    Packet   tx[TX_DEPTH];
+    Packet*  tx = nullptr;
     uint8_t  tx_head = 0, tx_count = 0;
     uint16_t tx_seq = 0, tx_total = 0;
 
@@ -161,6 +203,10 @@ public:
         identified = false;
         conn = handle;
         att_mtu = 23;
+        interval = latency = timeout = 0;
+        tx_phy = rx_phy = 1;
+        fast_asks = 0;
+        fast_refused = false;
         connected_ms = millis();
         rx_active = false;
         tx_head = tx_count = 0;
@@ -199,7 +245,7 @@ public:
 
 protected:
     virtual void send_outgoing(const RNS::Bytes& data) override {
-        if (!_online) return;
+        if (!_online || !tx) return;
         if (tx_count >= TX_DEPTH || data.size() > PACKET_MAX) {
             if (tx_drops++ == 0) {
                 Serial.printf("[BLE] %s: outgoing queue full, dropping (counted)\r\n", toString().c_str());
@@ -260,6 +306,17 @@ static int on_gap_event(ble_gap_event* event, void* arg) {
             control.conn = event->mtu.conn_handle;
             control.value = event->mtu.value;
             break;
+        case BLE_GAP_EVENT_CONN_UPDATE:
+            control.kind = CONTROL_PARAMS;
+            control.conn = event->conn_update.conn_handle;
+            control.status = event->conn_update.status;
+            break;
+        case BLE_GAP_EVENT_PHY_UPDATE_COMPLETE:
+            control.kind = CONTROL_PHY;
+            control.conn = event->phy_updated.conn_handle;
+            control.value = (uint16_t)(event->phy_updated.tx_phy << 8) | event->phy_updated.rx_phy;
+            control.status = event->phy_updated.status;
+            break;
         default:
             return 0;
     }
@@ -276,7 +333,11 @@ public:
         host_write.channel = channel;
         host_write.len = value.length() < VALUE_MAX ? value.length() : VALUE_MAX;
         memcpy(host_write.data, value.data(), host_write.len);
-        if (xQueueSend(write_queue, &host_write, 0) != pdTRUE) write_drops++;
+        if (xQueueSend(write_queue, &host_write, 0) != pdTRUE) {
+            // Full: wait here for loop() to make room (see the top of this file).
+            write_waits++;
+            xQueueSend(write_queue, &host_write, portMAX_DELAY);
+        }
     }
 private:
     Channel channel;
@@ -308,14 +369,25 @@ inline void start() {
     size_t psram_before    = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
 
     control_queue = xQueueCreate(CONTROL_DEPTH, sizeof(ControlEvent));
-    // The write queue's storage (8 KB) goes in PSRAM; only loop() and the
-    // NimBLE task touch it, never an interrupt.
+    // The write queue's storage and each slot's outgoing packets go in
+    // PSRAM; only loop() and the NimBLE task touch them, never an interrupt.
     static StaticQueue_t write_queue_state;
     uint8_t* write_storage = (uint8_t*)heap_caps_malloc(WRITE_DEPTH * sizeof(WriteEvent), MALLOC_CAP_SPIRAM);
-    if (!write_storage) {
+    bool have_memory = write_storage != nullptr;
+    for (int i = 0; i < SLOTS && have_memory; i++) {
+        slots[i]->tx = (BlePeerInterface::Packet*)heap_caps_malloc(
+            TX_DEPTH * sizeof(BlePeerInterface::Packet), MALLOC_CAP_SPIRAM);
+        have_memory = slots[i]->tx != nullptr;
+    }
+    if (!have_memory) {
         // No PSRAM (the caller checks, firewall_ble_has_psram()), or none
         // left: NimBLE's own pools live there too and would assert.
         Serial.println("[BLE] not started: no PSRAM for its memory");
+        heap_caps_free(write_storage);
+        for (int i = 0; i < SLOTS; i++) {
+            heap_caps_free(slots[i]->tx);
+            slots[i]->tx = nullptr;
+        }
         return;
     }
     write_queue = xQueueCreateStatic(WRITE_DEPTH, sizeof(WriteEvent), write_storage, &write_queue_state);
@@ -355,7 +427,8 @@ inline void start() {
     id_char->setValue(our_identity, IDENTITY_LEN);
     control_char = service->createCharacteristic(CONTROL_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
     control_char->setCallbacks(&control_callbacks);
-    data_char = service->createCharacteristic(DATA_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
+    data_char = service->createCharacteristic(DATA_UUID,
+                                              NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::NOTIFY);
     data_char->setCallbacks(&data_callbacks);
     service->start();
 
@@ -386,10 +459,27 @@ inline void start() {
 }
 
 // ─── loop(): peers come and go ───────────────────────────────────────────────
+// The link's connection parameters as they stand.
+static void read_params(BlePeerInterface* slot) {
+    ble_gap_conn_desc desc;
+    if (ble_gap_conn_find(slot->conn, &desc) != 0) return;
+    slot->interval = desc.conn_itvl;
+    slot->latency = desc.conn_latency;
+    slot->timeout = desc.supervision_timeout;
+}
+
+static void log_params(BlePeerInterface* slot, const char* what) {
+    Serial.printf("[BLE] %s: %s: interval %u.%02u ms, latency %u, supervision timeout %u ms\r\n",
+                  slot->label().c_str(), what, (unsigned)(slot->interval * 125 / 100),
+                  (unsigned)(slot->interval * 125 % 100), (unsigned)slot->latency, (unsigned)slot->timeout * 10);
+}
+
 static void on_connect(uint16_t conn) {
     for (int i = 0; i < SLOTS; i++) {
         if (!slots[i]->used) {
             slots[i]->attach(conn);
+            read_params(slots[i]);
+            log_params(slots[i], "connected");
             break;
         }
     }
@@ -419,6 +509,34 @@ static bool notify(uint16_t conn, NimBLECharacteristic* characteristic, const ui
     return ble_gattc_notify_custom(conn, characteristic->getHandle(), om) == 0;   // consumes om
 }
 
+// A 15 ms interval, when the link runs slower (FAST_ASKS_MAX). A peer that
+// already runs 15 ms events or faster (Android asks for 11.25-15 ms itself)
+// is not slowed down; one that refused is not asked again.
+static void ask_fast_interval(BlePeerInterface* slot) {
+    if (slot->interval <= FAST_INTERVAL || slot->fast_refused || slot->fast_asks >= FAST_ASKS_MAX) return;
+    slot->fast_asks++;
+    ble_gap_upd_params wanted = {};
+    wanted.itvl_min = FAST_INTERVAL;
+    wanted.itvl_max = FAST_INTERVAL;
+    wanted.latency = 0;
+    // The phone's own supervision timeout, brought into Apple's range.
+    wanted.supervision_timeout = slot->timeout < TIMEOUT_MIN ? TIMEOUT_MIN
+                               : slot->timeout > TIMEOUT_MAX ? TIMEOUT_MAX : slot->timeout;
+    int rc = ble_gap_update_params(slot->conn, &wanted);
+    Serial.printf("[BLE] %s: asked for a 15 ms interval (rc %d)\r\n", slot->label().c_str(), rc);
+}
+
+// Asks for the fastest link the peer will take (see the top of this file).
+// Each answer arrives as its own event and is logged there.
+static void request_fast_link(BlePeerInterface* slot) {
+    int packets = ble_gap_set_data_len(slot->conn, LL_OCTETS_MAX, LL_TIME_MAX);
+    int phy = ble_gap_set_prefered_le_phy(slot->conn, BLE_GAP_LE_PHY_2M_MASK, BLE_GAP_LE_PHY_2M_MASK,
+                                          BLE_GAP_LE_PHY_CODED_ANY);
+    Serial.printf("[BLE] %s: asked for %u-byte link-layer packets (rc %d) and the 2M PHY (rc %d)\r\n",
+                  slot->label().c_str(), (unsigned)LL_OCTETS_MAX, packets, phy);
+    ask_fast_interval(slot);
+}
+
 // The central's identity: its first 16-byte write to RX (Columba), or the
 // identity in its Hello (Prns).
 static void on_identity(int index, const uint8_t* identity, BlePeerInterface::Protocol protocol) {
@@ -446,6 +564,8 @@ static void on_identity(int index, const uint8_t* identity, BlePeerInterface::Pr
     Serial.printf("[BLE] %s: %s peer %s identified, MTU %u\r\n", slot->label().c_str(),
                   protocol == BlePeerInterface::PROTOCOL_PRNS ? "Prns" : "Columba",
                   short_identity(identity).c_str(), (unsigned)slot->att_mtu);
+    read_params(slot);
+    request_fast_link(slot);
 }
 
 // A Prns Hello, answered with our Welcome.
@@ -551,8 +671,9 @@ static void on_write(const WriteEvent& write) {
     }
 }
 
-// One fragment of the slot's first queued packet, as a notification.
-static void send_next_fragment(BlePeerInterface* slot) {
+// One fragment of the slot's first queued packet, as a notification. False
+// when nothing more should go to this slot on this pass.
+static bool send_next_fragment(BlePeerInterface* slot) {
     static uint8_t fragment[VALUE_MAX];
     const BlePeerInterface::Packet& packet = slot->tx[slot->tx_head];
     size_t usable = slot->att_mtu > 3 ? slot->att_mtu - 3 : 20;
@@ -577,13 +698,13 @@ static void send_next_fragment(BlePeerInterface* slot) {
     os_mbuf* om = ble_hs_mbuf_from_flat(fragment, FRAG_HEADER + n);
     if (!om) {
         slot->enomem++;
-        return;
+        return false;
     }
     NimBLECharacteristic* out = slot->protocol == BlePeerInterface::PROTOCOL_PRNS ? data_char : tx_char;
     int rc = ble_gattc_notify_custom(slot->conn, out->getHandle(), om);   // consumes om
     if (rc == BLE_HS_ENOMEM) {
         slot->enomem++;
-        return;
+        return false;
     }
     if (rc != 0) {
         // The link is going or gone; this packet will not arrive whole.
@@ -591,7 +712,7 @@ static void send_next_fragment(BlePeerInterface* slot) {
         slot->tx_seq = 0;
         slot->tx_head = (slot->tx_head + 1) % TX_DEPTH;
         slot->tx_count--;
-        return;
+        return false;
     }
     slot->last_sent_ms = millis();
     slot->tx_seq++;
@@ -602,21 +723,25 @@ static void send_next_fragment(BlePeerInterface* slot) {
         slot->tx_head = (slot->tx_head + 1) % TX_DEPTH;
         slot->tx_count--;
     }
+    return true;
 }
 
 static void report() {
-    Serial.printf("[BLE] t=%lu drops control/write %lu/%lu orphans %lu self %lu replaced %lu internal %u\r\n",
-                  (unsigned long)millis(), (unsigned long)control_drops, (unsigned long)write_drops,
+    Serial.printf("[BLE] t=%lu control drops %lu write waits %lu orphans %lu self %lu replaced %lu internal %u\r\n",
+                  (unsigned long)millis(), (unsigned long)control_drops, (unsigned long)write_waits,
                   (unsigned long)orphan_writes, (unsigned long)self_connections, (unsigned long)replaced,
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     for (int i = 0; i < SLOTS; i++) {
         BlePeerInterface* s = slots[i];
         if (!s->used && s->peers == 0) continue;
-        Serial.printf("[BLE]   %s %s %s peer %s mtu %u peers %lu (prns %lu) rx %lu/%lu tx %lu/%lu queued %u "
+        Serial.printf("[BLE]   %s %s %s peer %s mtu %u interval %u.%02u ms phy %u/%u peers %lu (prns %lu) "
+                      "rx %lu/%lu tx %lu/%lu queued %u "
                       "drops %lu bad %lu/%lu keepalive in/out %lu/%lu early %lu enomem %lu errors %lu\r\n",
                       s->label().c_str(), s->used ? (s->identified ? "up" : "joining") : "free",
                       s->identified ? (s->protocol == BlePeerInterface::PROTOCOL_PRNS ? "prns" : "columba") : "-",
                       s->identified ? short_identity(s->identity).c_str() : "-", (unsigned)s->att_mtu,
+                      (unsigned)(s->interval * 125 / 100), (unsigned)(s->interval * 125 % 100),
+                      (unsigned)s->tx_phy, (unsigned)s->rx_phy,
                       (unsigned long)s->peers, (unsigned long)s->prns_peers,
                       (unsigned long)s->rx_packets, (unsigned long)s->rx_bytes,
                       (unsigned long)s->tx_packets, (unsigned long)s->tx_bytes, (unsigned)s->tx_count,
@@ -648,9 +773,37 @@ inline void loop() {
             BlePeerInterface* slot = slot_for(control.conn);
             if (slot) slot->att_mtu = control.value;
         }
+        else if (control.kind == CONTROL_PARAMS) {
+            BlePeerInterface* slot = slot_for(control.conn);
+            if (!slot) continue;
+            read_params(slot);
+            char what[40];
+            snprintf(what, sizeof(what), "parameters updated (status %d)", (int)control.status);
+            log_params(slot, what);
+            // A failed update is the phone refusing ours, unless it failed
+            // only because the phone's own update was running at the same
+            // moment (LL Procedure Collision, Different Transaction
+            // Collision): that one's outcome arrives as the next update.
+            bool collision = control.status == BLE_HS_ERR_HCI_BASE + 0x23 ||
+                             control.status == BLE_HS_ERR_HCI_BASE + 0x2A;
+            if (control.status != 0 && !collision) slot->fast_refused = true;
+            else if (control.status == 0 && slot->identified) ask_fast_interval(slot);
+        }
+        else if (control.kind == CONTROL_PHY) {
+            BlePeerInterface* slot = slot_for(control.conn);
+            if (!slot) continue;
+            if (control.status == 0) {
+                slot->tx_phy = control.value >> 8;
+                slot->rx_phy = control.value & 0xFF;
+            }
+            // PHY 1 is 1M, 2 is 2M; a 4.2 phone answers the request with an error and stays on 1M.
+            Serial.printf("[BLE] %s: PHY %u/%u (update status 0x%x)\r\n", slot->label().c_str(),
+                          (unsigned)slot->tx_phy, (unsigned)slot->rx_phy, (unsigned)control.status);
+        }
     }
-    // A few writes per pass, so a busy peer cannot hold up the loop.
-    for (int i = 0; i < 4 && xQueueReceive(write_queue, &loop_write, 0) == pdTRUE; i++) {
+    // Writes, a bounded number per pass so a busy peer cannot hold up the
+    // loop; a write that finds the queue full waits in the host task.
+    for (int i = 0; i < WRITES_PER_PASS && xQueueReceive(write_queue, &loop_write, 0) == pdTRUE; i++) {
         on_write(loop_write);
     }
     uint32_t now_ms = millis();
@@ -658,7 +811,7 @@ inline void loop() {
         BlePeerInterface* slot = slots[i];
         if (!slot->used || !slot->identified) continue;
         if (slot->tx_count > 0) {
-            send_next_fragment(slot);
+            for (int n = 0; n < FRAGMENTS_PER_PASS && slot->tx_count > 0 && send_next_fragment(slot); n++) {}
         }
         else if (slot->protocol == BlePeerInterface::PROTOCOL_COLUMBA &&
                  now_ms - slot->last_sent_ms >= KEEPALIVE_EVERY_MS) {
