@@ -2096,7 +2096,7 @@ static uint32_t ingress_dropped = 0;
 					if (dest.hash() == packet.destination_hash()) { is_local_destination = true; break; }
 				}
 #endif
-				NOTICE("FWD-CHECK - FROM: " + packet.receiving_interface().toString() + " (" + zone_tag(is_backbone_interface(packet.receiving_interface())) + ") TO: " + short_hash(packet.destination_hash()) + " (" + dest_zone(packet.destination_hash()) + ") " + (is_local_destination ? "LOCAL" : "FWD"));
+				DEBUG("FWD-CHECK - FROM: " + packet.receiving_interface().toString() + " (" + zone_tag(is_backbone_interface(packet.receiving_interface())) + ") TO: " + short_hash(packet.destination_hash()) + " (" + dest_zone(packet.destination_hash()) + ") " + (is_local_destination ? "LOCAL" : "FWD"));
 				if (is_local_destination) {
 					NOTICE("SKIP-FWD - TO: " + short_hash(packet.destination_hash()) + " is local dest");
 				}
@@ -2336,8 +2336,10 @@ static uint32_t ingress_dropped = 0;
 				auto link_iter = _link_table.find(packet.destination_hash());
 				if (link_iter != _link_table.end()) {
 					LinkEntry& link_entry = (*link_iter).second;
-					NOTICE("LINK-XPORT: pkt " + packet.destination_hash().toHex().substr(0,8) + " type=" + std::to_string(packet.packet_type()) + " ctx=" + std::to_string(packet.context()) + " hops=" + std::to_string(packet.hops()) + " from=" + packet.receiving_interface().toString() + " sz=" + std::to_string(packet.raw().size()));
-					NOTICE("LINK-XPORT: entry hops=" + std::to_string(link_entry._hops) + " rem=" + std::to_string(link_entry._remaining_hops) + " recv=" + link_entry._receiving_interface.toString() + " out=" + link_entry._outbound_interface.toString() + " val=" + std::to_string(link_entry._validated));
+					// Per packet, so DEBUG: at the node's VERBOSE level these lines and FWD-CHECK took
+					// ~5 of the ~7 ms each forwarded packet cost with a USB host reading (on_log flushes each line).
+					DEBUG("LINK-XPORT: pkt " + packet.destination_hash().toHex().substr(0,8) + " type=" + std::to_string(packet.packet_type()) + " ctx=" + std::to_string(packet.context()) + " hops=" + std::to_string(packet.hops()) + " from=" + packet.receiving_interface().toString() + " sz=" + std::to_string(packet.raw().size()));
+					DEBUG("LINK-XPORT: entry hops=" + std::to_string(link_entry._hops) + " rem=" + std::to_string(link_entry._remaining_hops) + " recv=" + link_entry._receiving_interface.toString() + " out=" + link_entry._outbound_interface.toString() + " val=" + std::to_string(link_entry._validated));
 					// If receiving and outbound interface is
 					// the same for this link, direction doesn't
 					// matter, and we simply send the packet on.
@@ -2387,7 +2389,7 @@ static uint32_t ingress_dropped = 0;
 					}
 
 					if (outbound_interface) {
-						NOTICE("LINK-XPORT: FWD to " + outbound_interface.toString());
+						DEBUG("LINK-XPORT: FWD to " + outbound_interface.toString());
 						if (is_resource_ctx(packet.context())) {
 							WLOG(packet, std::string(ctx_name(packet.context())) + " FWD to " + outbound_interface.toString() + " (" + zone_tag(is_backbone_interface(outbound_interface)) + ")");
 						}
