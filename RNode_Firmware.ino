@@ -876,6 +876,12 @@ void setup() {
     } else {
       #if HAS_WIFI
         wifi_mode = EEPROM.read(eeprom_addr(ADDR_CONF_WIFI));
+        #ifdef FIREWALL_MODE
+        // RTNode: the portal's WiFi setting decides. RNode's own saved mode
+        // stays "station" once WiFi has been enabled, and started WiFi here
+        // on every boot after the portal turned it off (2026-10-01).
+        if (!firewall_state.wifi_enabled) { wifi_mode = WR_WIFI_OFF; }
+        #endif
         if (wifi_mode == WR_WIFI_STA || wifi_mode == WR_WIFI_AP) { wifi_remote_init(); }
       #endif
       kiss_indicate_reset();
@@ -1039,6 +1045,11 @@ void setup() {
       firewall_state.ap_tcp_enabled = true;
       firewall_state.ap_tcp_port = 4242;
       Serial.write("[BENCH] overrides: backbones off, local TCP server on 4242 (saved settings untouched)\r\n");
+#ifdef RTNODE_BENCH_WIFI_ON
+      // WiFi tests on a node whose portal has WiFi off.
+      firewall_state.wifi_enabled = true;
+      Serial.write("[BENCH] overrides: WiFi on (saved settings untouched)\r\n");
+#endif
 #ifdef RTNODE_BENCH_WAN_HOST
       // WAN contract tests (tests/bench_contracts.py wan): backbone 1 goes to
       // a stand-in backbone on the bench (tests/wan-backbone/config), never a
@@ -1098,6 +1109,9 @@ void setup() {
           wifi_remote_init();
         }
       } else {
+        // Off means off: nothing before this point may have left it running.
+        if (wifi_initialized) { wifi_remote_stop(); }
+        wifi_mode = WR_WIFI_OFF;
         HEAD("Firewall Mode: WiFi DISABLED (LoRa-only repeater)", RNS::LOG_TRACE);
       }
 
@@ -2346,6 +2360,10 @@ void serial_callback(uint8_t sbyte) {
         if (sbyte == WR_WIFI_OFF || sbyte == WR_WIFI_STA || sbyte == WR_WIFI_AP) {
           wr_conf_save(sbyte);
           wifi_mode = sbyte;
+          #ifdef FIREWALL_MODE
+          // RTNode: WiFi runs only while the portal's WiFi setting is on.
+          if (!firewall_state.wifi_enabled) { wifi_mode = WR_WIFI_OFF; }
+          #endif
           wifi_remote_init();
         }
       #endif

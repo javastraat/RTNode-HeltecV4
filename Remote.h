@@ -130,11 +130,19 @@ void wifi_remote_start() {
   else if (wifi_mode == WR_WIFI_STA) { wifi_remote_start_sta(); }
   else                               { wifi_remote_stop(); }
 
+#ifdef FIREWALL_MODE
+  // RTNode runs Reticulum itself, and LAN clients use its local TCP server
+  // (TcpInterface). RNode's WiFi host port (7633) would give any device on
+  // the LAN the radio's KISS controls with no password, so RTNode never
+  // opens it (James, 2026-10-01).
+  remote_listener.end(); wr_state = WR_STATE_OFF;
+#else
   if (wifi_initialized == true) {
     remote_listener.begin();
     remote_listener.setTimeout(WR_SOCKET_TIMEOUT);
     wr_state = WR_STATE_ON;
   } else { remote_listener.end(); wr_state = WR_STATE_OFF; }
+#endif
 }
 
 void wifi_remote_init() {
