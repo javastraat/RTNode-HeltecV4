@@ -114,7 +114,14 @@
 #define ADDR_CONF_BSLOT_EN(slot)   (ADDR_CONF_BSLOT_BASE + ((slot) - 1) * FIREWALL_BACKBONE_SLOT_BYTES)
 #define ADDR_CONF_BSLOT_HOST(slot) (ADDR_CONF_BSLOT_EN(slot) + 1)
 #define ADDR_CONF_BSLOT_PORT(slot) (ADDR_CONF_BSLOT_HOST(slot) + FIREWALL_BACKBONE_HOST_LEN)
-// Total: 0x23E (574 bytes — still within the extended CONFIG area used on ESP32)
+// NomadNet node display name — independent of ADDR_CONF_NODE_NAME above, so
+// the repeater's own identity (advertise/discovery, and eventually a direct
+// chat/command destination) can carry a different name than the NomadNet
+// status node it hosts (e.g. "NL-AMS-RT-PD2EMC" vs "NL-AMS-RT-PD2EMC-N").
+// Empty = falls back to ADDR_CONF_NODE_NAME, same as that one falls back to
+// the auto-generated node-hash name.
+#define ADDR_CONF_NOMAD_NAME    0x23F // NomadNet node name (33 bytes, null-terminated; empty = falls back to node_name)
+// Total: 0x260 (608 bytes — still within the extended CONFIG area used on ESP32)
 
 #define FIREWALL_ENABLE_BYTE 0x73
 #define FIREWALL_APP_MARKER0 0x52
@@ -162,6 +169,7 @@ struct FirewallState {
     // boot, since the controller's memory is released when it is off.
     bool     ble_enabled;
     char     node_name[33];   // Human-readable name (empty = auto from node hash)
+    char     nomad_name[33];  // NomadNet node name (empty = falls back to node_name)
 
     // Airtime / duty-cycle limits, in fraction (0.0 = disabled, 0.01 = 1%).
     // Mirrored into the global st_airtime_limit / lt_airtime_limit at boot.
@@ -315,6 +323,7 @@ inline void firewall_load_config() {
         firewall_state.advert_publish_ifac = false;
         firewall_state.ble_enabled = true;
         firewall_state.node_name[0] = '\0';
+        firewall_state.nomad_name[0] = '\0';
         firewall_state.st_airtime_limit = 0.0f;
         firewall_state.lt_airtime_limit = 0.0f;
         st_airtime_limit = 0.0f;
@@ -443,6 +452,12 @@ inline void firewall_load_config() {
             if (firewall_state.node_name[i] == (char)0xFF) firewall_state.node_name[i] = '\0';
         }
         firewall_state.node_name[32] = '\0';
+
+        for (int i = 0; i < 32; i++) {
+            firewall_state.nomad_name[i] = EEPROM.read(config_addr(ADDR_CONF_NOMAD_NAME + i));
+            if (firewall_state.nomad_name[i] == (char)0xFF) firewall_state.nomad_name[i] = '\0';
+        }
+        firewall_state.nomad_name[32] = '\0';
     }
 
     // Airtime limits (1 byte each, percent * 10; 0xFF = unset = disabled).
@@ -558,6 +573,10 @@ inline void firewall_save_config() {
         EEPROM.write(config_addr(ADDR_CONF_NODE_NAME + i), firewall_state.node_name[i]);
     }
     EEPROM.write(config_addr(ADDR_CONF_NODE_NAME + 32), 0x00);
+    for (int i = 0; i < 32; i++) {
+        EEPROM.write(config_addr(ADDR_CONF_NOMAD_NAME + i), firewall_state.nomad_name[i]);
+    }
+    EEPROM.write(config_addr(ADDR_CONF_NOMAD_NAME + 32), 0x00);
 
     // Airtime limits — clamp to 0.0–25.5% then encode as percent * 10.
     {

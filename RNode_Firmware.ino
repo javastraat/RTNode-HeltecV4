@@ -3367,12 +3367,17 @@ void button_event(uint8_t event, unsigned long duration) {
       } else {
         // Double-click (two short clicks within 400ms): send an announce
         // right away, regardless of the "Advertise Device" portal setting.
+        // Also re-announces the Nomad Network status node (NomadNode.h) --
+        // otherwise it only re-announces on its own independent 30-minute
+        // timer, which can leave a fresh listener with no path to it for a
+        // while even though the device itself just announced loud and clear.
         static uint32_t last_short_click_ms = 0;
         uint32_t now = millis();
         if (last_short_click_ms != 0 && (now - last_short_click_ms) <= 400) {
           last_short_click_ms = 0;
           Serial.println("[Boundary] Double-click — sending manual announce");
           advertise_request_now();
+          nomadnode_request_now();
         } else {
           last_short_click_ms = now;
         }

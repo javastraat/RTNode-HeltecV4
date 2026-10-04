@@ -267,6 +267,15 @@ static void config_send_html() {
     html += F("'>");
 
     html += F(
+        "<p class='note'>Name for the Nomad Network status node this device hosts (see below) — "
+        "shown to anyone browsing to it. Leave blank to reuse the name above.</p>"
+        "<label>Nomad Network name</label>"
+        "<input name='nomad_name' maxlength='32' placeholder='e.g. My RNode N' value='"
+    );
+    html += String(firewall_state.nomad_name);
+    html += F("'>");
+
+    html += F(
         "<h2>&#x1f4f6; WiFi Network</h2>"
         "<label>WiFi</label>"
         "<select name='wifi_en'>"
@@ -816,6 +825,12 @@ static void config_handle_save() {
     node_name_arg.trim();
     memset(firewall_state.node_name, 0, sizeof(firewall_state.node_name));
     strncpy(firewall_state.node_name, node_name_arg.c_str(), sizeof(firewall_state.node_name) - 1);
+
+    // ── Nomad Network node name (independent of node_name above) ──
+    String nomad_name_arg = config_server->arg("nomad_name");
+    nomad_name_arg.trim();
+    memset(firewall_state.nomad_name, 0, sizeof(firewall_state.nomad_name));
+    strncpy(firewall_state.nomad_name, nomad_name_arg.c_str(), sizeof(firewall_state.nomad_name) - 1);
 
     // ── mDNS enable + hostname ──
     firewall_state.mdns_enabled = (config_server->arg("mdns_en").toInt() != 0);

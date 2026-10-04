@@ -1,4 +1,4 @@
-// ─────────────────────────────────────────────────────────────────────────────
+ // ─────────────────────────────────────────────────────────────────────────────
 //  NomadNode.h — Nomad Network status node for RTNode
 //
 //  Hosts a standard NomadNetwork node destination (app_name "nomadnetwork",
@@ -55,8 +55,10 @@ extern char     rtc_node_hash_hex[33];
 static RNS::Destination nomadnode_destination = {RNS::Type::NONE};
 static bool     nomadnode_initialised     = false;
 static uint32_t nomadnode_next_announce_ms = 0;
+static bool     nomadnode_manual_pending   = false;
 
 static std::string nomadnode_name() {
+    if (firewall_state.nomad_name[0] != '\0') return std::string(firewall_state.nomad_name);
     if (firewall_state.node_name[0] != '\0') return std::string(firewall_state.node_name);
     char name_buf[40];
     const char* hex = (rtc_node_hash_magic == NODE_HASH_RTC_MAGIC && rtc_node_hash_hex[0] != '\0')
@@ -206,6 +208,15 @@ inline void nomadnode_init() {
     RNS::info("[NomadNode] Node page server ready: " + nomadnode_name());
 }
 
+// Request an announce as soon as possible, bypassing the periodic interval
+// (button double-click, mirrors advertise_request_now() in Advertise.h).
+// No-op before nomadnode_init() has run. Picked up by the next
+// nomadnode_loop() call.
+inline void nomadnode_request_now() {
+    if (!nomadnode_initialised) return;
+    nomadnode_manual_pending = true;
+}
+
 // Periodic loop hook — call from the main loop(). Re-announces the node on
 // its own schedule so it stays reachable without depending on the separate
 // interface-discovery announcer (Advertise.h) or its "Advertise Device" toggle.
@@ -214,9 +225,10 @@ inline void nomadnode_loop() {
 
     uint32_t now = millis();
     int32_t delta = (int32_t)(now - nomadnode_next_announce_ms);
-    if (delta < 0) return;
+    if (delta < 0 && !nomadnode_manual_pending) return;
 
     nomadnode_destination.announce(RNS::Bytes(nomadnode_name()));
+    nomadnode_manual_pending   = false;
     nomadnode_next_announce_ms = now + (NOMADNODE_ANNOUNCE_INTERVAL_S * 1000UL);
 }
 
