@@ -26,6 +26,8 @@
 #include <string>
 #include <cstdio>
 #include <cstdarg>
+#include <map>
+#include <MsgPack.h>
 
 #include "FirewallMode.h"
 
@@ -87,6 +89,11 @@ static uint32_t nomadnode_boot_ms              = 0;
 static uint8_t  nomadnode_boot_schedule_index  = 0;
 static uint32_t nomadnode_next_announce_ms = 0;
 static bool     nomadnode_manual_pending   = false;
+
+// Forward declaration -- defined below (near nomadnode_loop()), but
+// nomadnode_page_advert() (defined earlier, alongside the other pages)
+// needs to call it.
+inline void nomadnode_request_now();
 
 static std::string rtnode_board_name() {
 #if BOARD_MODEL == BOARD_HELTEC32_V4
@@ -190,7 +197,8 @@ static RNS::Bytes nomadnode_page_index(const RNS::Bytes&, const RNS::Bytes&, con
     mu += "`[Stats`/page/stats.mu]\n";
     mu += "`[Info`/page/info.mu]\n";
     mu += "`[Hardware`/page/hardware.mu]\n";
-    mu += "`[Config`/page/config.mu]\n\n";
+    mu += "`[Config`/page/config.mu]\n";
+    mu += "`[Advert`/page/advert.mu]\n\n";
 
     mu += "-\n";
     mu += "`c`F888Reach it on the mesh \xE2\x80\x94 LoRa or WiFi.`f`a\n";
@@ -284,6 +292,141 @@ static RNS::Bytes nomadnode_page_config(const RNS::Bytes&, const RNS::Bytes&, co
     return mu_finish(mu, "config.mu");
 }
 
+// Lets anyone who can already reach this node (even over a shaky/stale
+// path) ask it to re-announce right now, without needing physical access
+// to the double-click button -- useful exactly in the reachability
+// situations this session spent so long on. ALLOW_ALL like every other
+// page here, so it's reachable by anyone on the mesh, not just the
+// operator: a per-visit cooldown stops it being an open spam lever that
+// could otherwise force constant re-announces at everyone else's airtime
+// expense.
+#define NOMADNODE_ADVERT_PAGE_COOLDOWN_MS (60UL * 1000UL)
+static uint32_t nomadnode_advert_page_last_ms = 0;
+
+static RNS::Bytes nomadnode_page_advert(const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Identity&, double) {
+    std::string mu;
+    mu_title(mu, "advert");
+
+    uint32_t now = millis();
+    if (now - nomadnode_advert_page_last_ms < NOMADNODE_ADVERT_PAGE_COOLDOWN_MS) {
+        mu += "Already queued recently -- try again in a bit.\n";
+    } else {
+        nomadnode_advert_page_last_ms = now;
+        nomadnode_request_now();
+        advertise_request_now();
+        mu += "Announce queued -- it'll go out shortly (CSMA permitting).\n";
+    }
+
+    mu += "\n`[<< Back`/page/index.mu]\n";
+    return mu_finish(mu, "advert.mu");
+}
+
+// ─── Admin action pages ──────────────────────────────────────────────────────
+// Password-gated, unlike every page above -- reserved for actions that
+// actually warrant it (reboot first; more may follow). Off entirely until
+// an operator sets firewall_state.admin_password in the portal (empty =
+// every one of these refuses the request outright, not just hides a link
+// -- there's deliberately no unauthenticated fallback). Not linked from
+// index.mu on purpose: the password is the real gate, but there's no
+// reason to also advertise these on the public landing page.
+//
+// Field submission format is NomadNet's own convention (a NomadNet/
+// Sideband-style client bundles every `<name`default> field on the
+// current page into the request as a msgpack map, keyed "field_<name>")
+// -- NOT yet live-verified against a real client from this firmware,
+// since nothing here could exercise it before now. If the password check
+// always fails even with the right password, this is the first place to
+// look -- confirm the actual submitted key/value shapes against a live
+// capture and adjust admin_password_ok() accordingly.
+static bool admin_password_ok(const RNS::Bytes& data) {
+    if (firewall_state.admin_password[0] == '\0') return false;
+    if (data.size() == 0) return false;
+
+    // MsgPack::str_t is Arduino's String on this build (Types.h), not
+    // std::string -- std::map<std::string, std::string> compiles but the
+    // library's unpack() can't actually fill a plain std::string value,
+    // only its own str_t.
+    MsgPack::Unpacker unpacker;
+    unpacker.feed(data.data(), data.size());
+    std::map<MsgPack::str_t, MsgPack::str_t> fields;
+    if (!unpacker.unpack(fields)) return false;
+
+    auto it = fields.find("field_password");
+    if (it == fields.end()) return false;
+    return it->second == firewall_state.admin_password;
+}
+
+// Shared login-form body for every admin_*.mu page -- submits back to
+// whichever exact path it was served from (RNS matches by exact path, so
+// each action is its own registered handler rather than one page with an
+// action selector).
+static void admin_login_form(std::string& mu, const char* self_path) {
+    mu += "`<field_password`>\n\n";
+    mu += std::string("`[Submit`") + self_path + "]\n";
+}
+
+static RNS::Bytes nomadnode_page_admin(const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Identity&, double) {
+    std::string mu;
+    mu_title(mu, "admin");
+
+    if (firewall_state.admin_password[0] == '\0') {
+        mu += "Admin actions are disabled (no password set in the portal).\n";
+    } else {
+        mu += "`[Send advert`/page/admin_advert.mu]\n";
+        mu += "`[Reboot`/page/admin_reboot.mu]\n";
+    }
+
+    mu += "\n`[<< Back`/page/index.mu]\n";
+    return mu_finish(mu, "admin.mu");
+}
+
+static RNS::Bytes nomadnode_page_admin_advert(const RNS::Bytes&, const RNS::Bytes& data, const RNS::Bytes&, const RNS::Bytes&, const RNS::Identity&, double) {
+    std::string mu;
+    mu_title(mu, "admin / advert");
+
+    if (!admin_password_ok(data)) {
+        if (data.size() > 0) mu += "Wrong password.\n\n";
+        admin_login_form(mu, "/page/admin_advert.mu");
+    } else {
+        nomadnode_request_now();
+        advertise_request_now();
+        mu += "Announce queued -- it'll go out shortly (CSMA permitting).\n";
+    }
+
+    mu += "\n`[<< Back`/page/admin.mu]\n";
+    return mu_finish(mu, "admin_advert.mu");
+}
+
+// Reboot is deferred to a check inside nomadnode_loop() (called every
+// main-loop pass) rather than calling ESP.restart() right here. This
+// handler runs inline in the same call stack that just queued the
+// confirmation response -- RNS::Packet::send() only enqueues bytes into
+// the TX queue (LoRaInterface::send_outgoing), it doesn't transmit
+// synchronously, and actually getting a frame on air can take a while on
+// a busy channel (CSMA backoff, the whole reason this session spent so
+// long on announce timing). Restarting immediately would almost
+// certainly tear the radio down before the queued confirmation page ever
+// reaches the client. Giving it a real window first means the one
+// person who should see "rebooting now" actually gets to.
+#define NOMADNODE_ADMIN_REBOOT_DELAY_MS (10UL * 1000UL)
+static uint32_t nomadnode_admin_reboot_at_ms = 0; // 0 = none pending
+
+static RNS::Bytes nomadnode_page_admin_reboot(const RNS::Bytes&, const RNS::Bytes& data, const RNS::Bytes&, const RNS::Bytes&, const RNS::Identity&, double) {
+    std::string mu;
+    mu_title(mu, "admin / reboot");
+
+    if (!admin_password_ok(data)) {
+        if (data.size() > 0) mu += "Wrong password.\n\n";
+        admin_login_form(mu, "/page/admin_reboot.mu");
+    } else {
+        nomadnode_admin_reboot_at_ms = millis() + NOMADNODE_ADMIN_REBOOT_DELAY_MS;
+        mu += "Rebooting in ~" + std::to_string(NOMADNODE_ADMIN_REBOOT_DELAY_MS / 1000) + "s.\n";
+    }
+
+    mu += "\n`[<< Back`/page/admin.mu]\n";
+    return mu_finish(mu, "admin_reboot.mu");
+}
+
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 // Initialise the node destination and register its pages. Call once after
@@ -306,6 +449,10 @@ inline void nomadnode_init() {
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/info.mu"),     nomadnode_page_info,     RNS::Type::Destination::ALLOW_ALL);
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/hardware.mu"), nomadnode_page_hardware, RNS::Type::Destination::ALLOW_ALL);
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/config.mu"),   nomadnode_page_config,   RNS::Type::Destination::ALLOW_ALL);
+    nomadnode_destination.register_request_handler(RNS::Bytes("/page/advert.mu"),   nomadnode_page_advert,   RNS::Type::Destination::ALLOW_ALL);
+    nomadnode_destination.register_request_handler(RNS::Bytes("/page/admin.mu"),        nomadnode_page_admin,        RNS::Type::Destination::ALLOW_ALL);
+    nomadnode_destination.register_request_handler(RNS::Bytes("/page/admin_advert.mu"), nomadnode_page_admin_advert, RNS::Type::Destination::ALLOW_ALL);
+    nomadnode_destination.register_request_handler(RNS::Bytes("/page/admin_reboot.mu"), nomadnode_page_admin_reboot, RNS::Type::Destination::ALLOW_ALL);
 
     nomadnode_initialised = true;
 
@@ -350,6 +497,14 @@ inline void nomadnode_loop() {
     if (!nomadnode_initialised) return;
 
     uint32_t now = millis();
+
+    // A password-confirmed admin reboot (nomadnode_page_admin_reboot) --
+    // checked ahead of the early-return below so it isn't skipped on a
+    // pass with nothing announce-related due.
+    if (nomadnode_admin_reboot_at_ms != 0 && (int32_t)(now - nomadnode_admin_reboot_at_ms) >= 0) {
+        ESP.restart();
+    }
+
     int32_t delta = (int32_t)(now - nomadnode_next_announce_ms);
     if (delta < 0 && !nomadnode_manual_pending) return;
 

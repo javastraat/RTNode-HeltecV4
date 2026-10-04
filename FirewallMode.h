@@ -121,7 +121,14 @@
 // Empty = falls back to ADDR_CONF_NODE_NAME, same as that one falls back to
 // the auto-generated node-hash name.
 #define ADDR_CONF_NOMAD_NAME    0x23F // NomadNet node name (33 bytes, null-terminated; empty = falls back to node_name)
-// Total: 0x260 (608 bytes — still within the extended CONFIG area used on ESP32)
+// Admin password for the NomadNet /page/admin_*.mu action pages (reboot,
+// etc. -- see NomadNode.h). Plaintext, same as every other secret stored
+// in this file (ifac_passphrase, ap_psk) -- not a new, inconsistent
+// storage scheme for just this one field. Empty = those pages refuse
+// every request, i.e. admin actions are off by default until a password
+// is set in the portal.
+#define ADDR_CONF_ADMIN_PASSWORD 0x260 // 33 bytes, null-terminated; empty = admin pages disabled
+// Total: 0x281 (641 bytes — still within the extended CONFIG area used on ESP32)
 
 #define FIREWALL_ENABLE_BYTE 0x73
 #define FIREWALL_APP_MARKER0 0x52
@@ -170,6 +177,7 @@ struct FirewallState {
     bool     ble_enabled;
     char     node_name[33];   // Human-readable name (empty = auto from node hash)
     char     nomad_name[33];  // NomadNet node name (empty = falls back to node_name)
+    char     admin_password[33]; // NomadNet admin action pages (empty = disabled)
 
     // Airtime / duty-cycle limits, in fraction (0.0 = disabled, 0.01 = 1%).
     // Mirrored into the global st_airtime_limit / lt_airtime_limit at boot.
@@ -324,6 +332,7 @@ inline void firewall_load_config() {
         firewall_state.ble_enabled = true;
         firewall_state.node_name[0] = '\0';
         firewall_state.nomad_name[0] = '\0';
+        firewall_state.admin_password[0] = '\0';
         firewall_state.st_airtime_limit = 0.0f;
         firewall_state.lt_airtime_limit = 0.0f;
         st_airtime_limit = 0.0f;
@@ -458,6 +467,12 @@ inline void firewall_load_config() {
             if (firewall_state.nomad_name[i] == (char)0xFF) firewall_state.nomad_name[i] = '\0';
         }
         firewall_state.nomad_name[32] = '\0';
+
+        for (int i = 0; i < 32; i++) {
+            firewall_state.admin_password[i] = EEPROM.read(config_addr(ADDR_CONF_ADMIN_PASSWORD + i));
+            if (firewall_state.admin_password[i] == (char)0xFF) firewall_state.admin_password[i] = '\0';
+        }
+        firewall_state.admin_password[32] = '\0';
     }
 
     // Airtime limits (1 byte each, percent * 10; 0xFF = unset = disabled).
@@ -577,6 +592,10 @@ inline void firewall_save_config() {
         EEPROM.write(config_addr(ADDR_CONF_NOMAD_NAME + i), firewall_state.nomad_name[i]);
     }
     EEPROM.write(config_addr(ADDR_CONF_NOMAD_NAME + 32), 0x00);
+    for (int i = 0; i < 32; i++) {
+        EEPROM.write(config_addr(ADDR_CONF_ADMIN_PASSWORD + i), firewall_state.admin_password[i]);
+    }
+    EEPROM.write(config_addr(ADDR_CONF_ADMIN_PASSWORD + 32), 0x00);
 
     // Airtime limits — clamp to 0.0–25.5% then encode as percent * 10.
     {

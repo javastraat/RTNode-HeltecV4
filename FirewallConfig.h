@@ -276,6 +276,18 @@ static void config_send_html() {
     html += F("'>");
 
     html += F(
+        "<h2>&#x1f512; Admin Actions</h2>"
+        "<p class='note'>Password for the NomadNet page's admin actions "
+        "(reboot, etc. — see the node's own <code>/page/admin.mu</code>), "
+        "reachable by anyone on the mesh who knows it. Leave blank to "
+        "disable those pages entirely.</p>"
+        "<label>Password</label>"
+        "<input name='admin_password' type='password' maxlength='32' placeholder='Leave blank to disable' value='"
+    );
+    html += String(firewall_state.admin_password);
+    html += F("'>");
+
+    html += F(
         "<h2>&#x1f4f6; WiFi Network</h2>"
         "<label>WiFi</label>"
         "<select name='wifi_en'>"
@@ -831,6 +843,11 @@ static void config_handle_save() {
     nomad_name_arg.trim();
     memset(firewall_state.nomad_name, 0, sizeof(firewall_state.nomad_name));
     strncpy(firewall_state.nomad_name, nomad_name_arg.c_str(), sizeof(firewall_state.nomad_name) - 1);
+
+    // ── NomadNet admin-pages password (blank = disabled) ──
+    String admin_password_arg = config_server->arg("admin_password");
+    memset(firewall_state.admin_password, 0, sizeof(firewall_state.admin_password));
+    strncpy(firewall_state.admin_password, admin_password_arg.c_str(), sizeof(firewall_state.admin_password) - 1);
 
     // ── mDNS enable + hostname ──
     firewall_state.mdns_enabled = (config_server->arg("mdns_en").toInt() != 0);
