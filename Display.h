@@ -149,6 +149,11 @@ uint32_t display_blanking_timeout = DISPLAY_BLANKING_TIMEOUT;
 uint8_t display_unblank_intensity = display_intensity;
 bool display_blanked = false;
 bool display_tx = false;
+
+// ── Transient "Announce sent" toast (double-click button action) ──────────
+#define ANNOUNCE_TOAST_MS 2000
+bool announce_toast_active = false;
+uint32_t announce_toast_until = 0;
 bool recondition_display = false;
 int disp_update_interval = 1000/disp_target_fps;
 int epd_update_interval = 1000/disp_target_fps;
@@ -1212,6 +1217,10 @@ void update_display(bool blank = false) {
   #ifdef FIREWALL_MODE
   if (display_lock_white) return;
   #endif
+  if (announce_toast_active) {
+    if ((int32_t)(millis() - announce_toast_until) < 0) return;
+    announce_toast_active = false;
+  }
   display_updating = true;
   if (blank == true) {
     last_disp_update = millis()-disp_update_interval-1;
@@ -1307,6 +1316,28 @@ void update_display(bool blank = false) {
 void display_unblank() {
   last_unblank_event = millis();
 }
+
+// Draws a brief full-screen status message (e.g. after a button-triggered
+// announce) and holds it on screen for ANNOUNCE_TOAST_MS — update_display()
+// skips redraws while announce_toast_active is set, above. Standard-OLED
+// boards only; T114/TDECK/TECHO use different display APIs and aren't wired
+// up here.
+#if HAS_DISPLAY && BOARD_MODEL != BOARD_HELTEC_T114 && BOARD_MODEL != BOARD_TDECK && BOARD_MODEL != BOARD_TECHO
+void show_announce_toast(bool ok) {
+  if (!disp_ready) return;
+  display_unblank();
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(10, 28);
+  display.print(ok ? "Announce sent" : "Announce failed");
+  display.display();
+  announce_toast_active = true;
+  announce_toast_until  = millis() + ANNOUNCE_TOAST_MS;
+}
+#else
+void show_announce_toast(bool ok) { (void)ok; }
+#endif
 
 void ext_fb_enable() {
   disp_ext_fb = true;

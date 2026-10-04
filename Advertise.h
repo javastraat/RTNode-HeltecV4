@@ -106,6 +106,12 @@ static bool     advertise_first_announce   = true;
 static uint32_t advertise_next_run_ms      = 0;
 static uint32_t advertise_announce_interval_ms = ADV_DEFAULT_ANNOUNCE_INTERVAL_S * 1000UL;
 
+// A user-requested announce (double-click) bypasses the "Advertise Device"
+// toggle and the periodic interval, and — unlike the periodic announce —
+// shows a confirmation on the display once it actually goes out.
+static bool advertise_manual_pending  = false;
+static bool advertise_manual_inflight = false;
+
 // Cached stamp keyed by infohash so we only redo the proof-of-work when the
 // advertised parameters actually change (matches InterfaceAnnouncer.stamp_cache).
 // Stamp is persisted to ESP32 NVS to survive reboots.
@@ -462,6 +468,11 @@ static void advertise_send(const RNS::Bytes& packed, const RNS::Bytes& stamp) {
 
     advertise_first_announce = false;
     advertise_next_run_ms    = millis() + advertise_announce_interval_ms;
+
+    if (advertise_manual_inflight) {
+        advertise_manual_inflight = false;
+        show_announce_toast(true);
+    }
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
@@ -501,13 +512,20 @@ inline void advertise_init() {
     }
 }
 
+// Request an announce as soon as possible, bypassing the "Advertise Device"
+// toggle and the periodic interval (button double-click). No-op before
+// advertise_init() has run. Picked up by the next advertise_loop() call.
+inline void advertise_request_now() {
+    if (!advertise_initialised) return;
+    advertise_manual_pending = true;
+}
+
 // Periodic loop hook — call from the main loop(). Each call does one small
 // step: when an announce is due, builds the info and either reuses the cached
 // stamp or starts a new one; while a stamp is being made, hashes one workblock
 // round or searches for ADV_STAMP_SLICE_US.
 inline void advertise_loop() {
     if (!advertise_initialised) return;
-    if (!firewall_state.advert_enabled) return;
 
     if (adv_stamp.phase == ADV_PHASE_WORKBLOCK) {
         adv_hash_workblock_round(adv_stamp.round++);
@@ -527,6 +545,10 @@ inline void advertise_loop() {
                 RNS::error("[Advertise] Stamp generation failed; skipping announce");
                 adv_stamp.phase = ADV_PHASE_IDLE;
                 advertise_next_run_ms = millis() + advertise_announce_interval_ms;
+                if (advertise_manual_inflight) {
+                    advertise_manual_inflight = false;
+                    show_announce_toast(false);
+                }
             }
             return;
         }
@@ -542,13 +564,21 @@ inline void advertise_loop() {
         return;
     }
 
+    bool manual_due = advertise_manual_pending;
+    if (!firewall_state.advert_enabled && !manual_due) return;
+
     uint32_t now = millis();
     // Handle uint32 wrap-around: only treat as "due" when the unsigned
     // difference is small. millis() wraps roughly every 49 days, well after
     // any reasonable announce interval, so a wrap will at worst cause a single
     // announce to fire one cycle early.
     int32_t delta = (int32_t)(now - advertise_next_run_ms);
-    if (delta < 0) return;
+    if (!manual_due && delta < 0) return;
+
+    if (manual_due) {
+        advertise_manual_pending  = false;
+        advertise_manual_inflight = true;
+    }
 
     RNS::verbose("[Advertise] Building discovery announce");
     RNS::Bytes packed = advertise_build_info();

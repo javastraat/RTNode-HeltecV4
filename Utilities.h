@@ -396,20 +396,18 @@ extern RNS::Reticulum reticulum;
 // ── Headless LED indicators (for Heltec V4 without OLED) ─────────────────
 // Uses LEDC PWM for smooth ramp effects on pin_led_tx (GPIO 35)
 #if BOARD_MODEL == BOARD_HELTEC32_V4 || BOARD_MODEL == BOARD_HELTEC32_V3
-  #define HEADLESS_LED_CHANNEL 0
   bool headless_led_pwm_attached = false;
 
   void headless_led_ensure_pwm() {
     if (!headless_led_pwm_attached) {
-      ledcSetup(HEADLESS_LED_CHANNEL, 5000, 8);  // channel 0, 5kHz, 8-bit
-      ledcAttachPin(pin_led_tx, HEADLESS_LED_CHANNEL);
+      ledcAttach(pin_led_tx, 5000, 8);  // 5kHz, 8-bit
       headless_led_pwm_attached = true;
     }
   }
 
   void headless_led_detach_pwm() {
     if (headless_led_pwm_attached) {
-      ledcDetachPin(pin_led_tx);
+      ledcDetach(pin_led_tx);
       headless_led_pwm_attached = false;
       pinMode(pin_led_tx, OUTPUT);
     }
@@ -418,7 +416,7 @@ extern RNS::Reticulum reticulum;
   // Solid ON — normal headless operation
   void headless_led_solid() {
     headless_led_ensure_pwm();
-    ledcWrite(HEADLESS_LED_CHANNEL, 255);
+    ledcWrite(pin_led_tx, 255);
   }
 
   // Fast blink — replaces "white screen" indicator (non-blocking, call from loop)
@@ -430,7 +428,7 @@ extern RNS::Reticulum reticulum;
     if (now - last_toggle >= 100) {  // 5Hz blink
       last_toggle = now;
       on = !on;
-      ledcWrite(HEADLESS_LED_CHANNEL, on ? 255 : 0);
+      ledcWrite(pin_led_tx, on ? 255 : 0);
     }
   }
 
@@ -446,13 +444,13 @@ extern RNS::Reticulum reticulum;
       brightness += direction;
       if (brightness >= 255) { brightness = 255; direction = -1; }
       if (brightness == 0)   { direction = 1; }
-      ledcWrite(HEADLESS_LED_CHANNEL, brightness);
+      ledcWrite(pin_led_tx, brightness);
     }
   }
 
   void headless_led_off() {
     if (headless_led_pwm_attached) {
-      ledcWrite(HEADLESS_LED_CHANNEL, 0);
+      ledcWrite(pin_led_tx, 0);
     } else {
       digitalWrite(pin_led_tx, LOW);
     }

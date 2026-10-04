@@ -312,37 +312,31 @@ Registers a request handler.
 :param allowed_list: A list of *bytes-like* :ref:`RNS.Identity<api-identity>` hashes.
 :raises: ``ValueError`` if any of the supplied arguments are invalid.
 */
-/*
-void Destination::register_request_handler(const Bytes& path, response_generator = None, request_policies allow = ALLOW_NONE, allowed_list = None) {
-	if path == None or path == "":
-		raise ValueError("Invalid path specified")
-	elif not callable(response_generator):
-		raise ValueError("Invalid response generator specified")
-	elif not allow in Destination.request_policies:
-		raise ValueError("Invalid request policy")
-	else:
-		path_hash = RNS.Identity.truncated_hash(path.encode("utf-8"))
-		request_handler = [path, response_generator, allow, allowed_list]
-		self.request_handlers[path_hash] = request_handler
+void Destination::register_request_handler(const Bytes& path, RequestHandler::response_generator response_generator, Type::Destination::request_policies allow /*= Type::Destination::ALLOW_NONE*/, const std::set<Bytes>& allowed_list /*= {}*/) {
+	assert(_object);
+	assert(path);
+	assert(response_generator != nullptr);
+	Bytes path_hash = Identity::truncated_hash(path);
+	RequestHandler handler;
+	handler._path = path;
+	handler._response_generator = response_generator;
+	handler._allow = allow;
+	handler._allowed_list = allowed_list;
+	_object->_request_handlers[path_hash] = handler;
 }
-*/
 
-/*
-Deregisters a request handler.
-
-:param path: The path for the request handler to be deregistered.
-:returns: True if the handler was deregistered, otherwise False.
-*/
-/*
 bool Destination::deregister_request_handler(const Bytes& path) {
-	path_hash = RNS.Identity.truncated_hash(path.encode("utf-8"))
-	if path_hash in self.request_handlers:
-		self.request_handlers.pop(path_hash)
-		return True
-	else:
-		return False
+	assert(_object);
+	Bytes path_hash = Identity::truncated_hash(path);
+	auto request_handler_entry = _object->_request_handlers.find(path_hash);
+	if (request_handler_entry != _object->_request_handlers.end()) {
+		_object->_request_handlers.erase(request_handler_entry);
+		return true;
+	}
+	else {
+		return false;
+	}
 }
-*/
 
 void Destination::receive(const Packet& packet) {
 	assert(_object);

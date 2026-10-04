@@ -168,7 +168,7 @@
 	uint16_t read_len		= 0;
 
 	// Incoming packet buffer
-	uint8_t pbuf[MTU];
+	uint8_t rbuf[MTU];
 
 	// KISS command buffer
 	uint8_t cmdbuf[CMD_L];

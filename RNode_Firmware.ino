@@ -36,6 +36,7 @@
 #include "TcpInterface.h"
 #include "FirewallConfig.h"
 #include "Advertise.h"
+#include "NomadNode.h"
 #include "BleInterface.h"
 #include "MdnsService.h"
 #include "esp_bt.h"
@@ -499,7 +500,12 @@ void setup() {
 
   // Configure WDT
   #if MCU_VARIANT == MCU_ESP32
-    esp_task_wdt_init(WDT_TIMEOUT, true); // enable panic so ESP32 restarts
+    esp_task_wdt_config_t wdt_config = {
+      .timeout_ms = WDT_TIMEOUT * 1000,
+      .idle_core_mask = 0,
+      .trigger_panic = true, // enable panic so ESP32 restarts
+    };
+    esp_task_wdt_init(&wdt_config);
     esp_task_wdt_add(NULL);               // add current thread to WDT watch
   #elif MCU_VARIANT == MCU_NRF52
     NRF_WDT->CONFIG         = 0x01;           // Configure WDT to run when CPU is asleep
@@ -605,7 +611,7 @@ void setup() {
   #endif
 
   // Initialise buffers
-  memset(pbuf, 0, sizeof(pbuf));
+  memset(rbuf, 0, sizeof(rbuf));
   memset(cmdbuf, 0, sizeof(cmdbuf));
   
   memset(packet_queue, 0, sizeof(packet_queue));
@@ -1306,6 +1312,10 @@ void setup() {
       // announcer is a no-op until the user has enabled "Advertise Device"
       // in the captive-portal configuration.
       advertise_init();
+
+      // Nomad Network status node: lets anyone with a Nomad Network browser
+      // connect to this repeater over the mesh and check its stats/config.
+      nomadnode_init();
 #ifdef RTNODE_BLE
       if (firewall_state.ble_enabled && firewall_ble_has_psram()) {
         ble::start();
@@ -1374,7 +1384,7 @@ void lora_receive() {
 }
 
 // Hands one received packet to RNS and the host. buf is the packet's own
-// copy, never pbuf on ESP32/nRF52: pbuf may hold the first half of a split
+// copy, never rbuf on ESP32/nRF52: rbuf may hold the first half of a split
 // packet that is still arriving.
 inline void kiss_write_packet(const uint8_t *buf, uint16_t len) {
 
@@ -1426,12 +1436,12 @@ inline uint32_t split_window_ms() {
 inline void getPacketData(uint16_t len) {
   #if MCU_VARIANT != MCU_NRF52
     while (len-- && read_len < MTU) {
-      pbuf[read_len++] = LoRa->read();
+      rbuf[read_len++] = LoRa->read();
     }  
   #else
     BaseType_t int_mask = taskENTER_CRITICAL_FROM_ISR();
     while (len-- && read_len < MTU) {
-      pbuf[read_len++] = LoRa->read();
+      rbuf[read_len++] = LoRa->read();
     }
     taskEXIT_CRITICAL_FROM_ISR(int_mask);
   #endif
@@ -1456,7 +1466,7 @@ void ISR_VECT receive_callback(int packet_size) {
     // full (SPLIT_FIRST_LEN bytes after the header), the second 1 to
     // SPLIT_FIRST_LEN. A frame that fits neither role is half of a packet
     // whose other half we missed (we were transmitting, or it collided).
-    // Taken as a first part, it left stale bytes in pbuf for the next split
+    // Taken as a first part, it left stale bytes in rbuf for the next split
     // packet with the same 4-bit sequence to be glued onto.
     if (seq != SEQ_UNSET && millis() - split_started_ms > split_window_ms()) {
       // The second half never came.
@@ -1515,7 +1525,7 @@ void ISR_VECT receive_callback(int packet_size) {
       if (seq != SEQ_UNSET) {
         // A split-packet reassembly is in progress.  Deliver this
         // non-split packet through a side channel without touching
-        // pbuf or seq — read straight from the LoRa FIFO into a
+        // rbuf or seq — read straight from the LoRa FIFO into a
         // modem_packet allocation.
         #if MCU_VARIANT == MCU_ESP32 || MCU_VARIANT == MCU_NRF52
         {
@@ -1534,7 +1544,7 @@ void ISR_VECT receive_callback(int packet_size) {
               modem_packet_free(mp);
             }
           }
-          // pbuf, read_len, and seq are untouched — frame 2 will
+          // rbuf, read_len, and seq are untouched — frame 2 will
           // still match when it arrives.
         }
         #else
@@ -1577,7 +1587,7 @@ void ISR_VECT receive_callback(int packet_size) {
         kiss_indicate_stat_snr();
 
         // And then write the entire packet
-        kiss_write_packet(pbuf, read_len); read_len = 0;
+        kiss_write_packet(rbuf, read_len); read_len = 0;
       
       #else
         // Allocate packet struct, but abort if there
@@ -1594,7 +1604,7 @@ void ISR_VECT receive_callback(int packet_size) {
         // allocated memory again if the queue is
         // unable to receive the packet.
         modem_packet->len = read_len;
-        memcpy(modem_packet->data, pbuf, read_len); read_len = 0;
+        memcpy(modem_packet->data, rbuf, read_len); read_len = 0;
         if (!modem_packet_queue || xQueueSendFromISR(modem_packet_queue, &modem_packet, NULL) != pdPASS) {
           modem_packet_free(modem_packet);
         }
@@ -1616,7 +1626,7 @@ void ISR_VECT receive_callback(int packet_size) {
       kiss_indicate_stat_snr();
 
       // And then write the entire packet
-      kiss_write_packet(pbuf, read_len);
+      kiss_write_packet(rbuf, read_len);
 
     #else
       getPacketData(packet_size);
@@ -2972,6 +2982,7 @@ void loop() {
   // No-op until Reticulum is up and the user has enabled "Advertise Device".
   if (reticulum) {
     advertise_loop();
+    nomadnode_loop();
   }
 #ifdef RTNODE_BLE
   if (reticulum) {
@@ -3156,7 +3167,7 @@ void loop() {
 
         kiss_indicate_stat_rssi();
         kiss_indicate_stat_snr();
-        // From the queued copy, not through pbuf: pbuf may hold the first
+        // From the queued copy, not through rbuf: rbuf may hold the first
         // half of a split packet still arriving, and copying this packet
         // over it corrupted that packet's head.
         kiss_write_packet(modem_packet->data, modem_packet->len);
@@ -3354,6 +3365,17 @@ void button_event(uint8_t event, unsigned long duration) {
           sleep_now();
         #endif
       } else {
+        // Double-click (two short clicks within 400ms): send an announce
+        // right away, regardless of the "Advertise Device" portal setting.
+        static uint32_t last_short_click_ms = 0;
+        uint32_t now = millis();
+        if (last_short_click_ms != 0 && (now - last_short_click_ms) <= 400) {
+          last_short_click_ms = 0;
+          Serial.println("[Boundary] Double-click — sending manual announce");
+          advertise_request_now();
+        } else {
+          last_short_click_ms = now;
+        }
         display_unblank();
       }
       #else

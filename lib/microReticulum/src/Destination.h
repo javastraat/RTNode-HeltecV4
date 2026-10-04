@@ -26,6 +26,7 @@ namespace RNS {
 	public:
 		using response_generator = Bytes(*)(const Bytes& path, const Bytes& data, const Bytes& request_id, const Bytes& link_id, const Identity& remote_identity, double requested_at);
 	public:
+		RequestHandler() {}
 		RequestHandler(const RequestHandler& handler) {
 			_path = handler._path;
 			_response_generator = handler._response_generator;
@@ -124,6 +125,24 @@ namespace RNS {
 		*/
 		inline void accepts_links(bool accepts) { assert(_object); _object->_accept_link_requests = accepts; }
 		inline bool accepts_links() { assert(_object); return _object->_accept_link_requests; }
+
+		/*
+		Registers a request handler.
+
+		:param path: The path for the request handler to be registered.
+		:param response_generator: A function with the signature *response_generator(path, data, request_id, link_id, remote_identity, requested_at)* to be called. Whatever this function returns will be sent as a response to the requester.
+		:param allow: One of ``Type::Destination::ALLOW_NONE``, ``ALLOW_ALL`` or ``ALLOW_LIST``.
+		:param allowed_list: A list of Identity hashes, used when allow is ALLOW_LIST.
+		*/
+		void register_request_handler(const Bytes& path, RequestHandler::response_generator response_generator, Type::Destination::request_policies allow = Type::Destination::ALLOW_NONE, const std::set<Bytes>& allowed_list = {});
+
+		/*
+		Deregisters a request handler.
+
+		:param path: The path for the request handler to be deregistered.
+		:returns: true if the handler was deregistered, otherwise false.
+		*/
+		bool deregister_request_handler(const Bytes& path);
 
 		/*
 			Registers a function to be called when a link has been established to
