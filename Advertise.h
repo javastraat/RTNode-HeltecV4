@@ -92,9 +92,24 @@ extern char     rtc_node_hash_hex[33];
 // fallback when announce_interval is not specified (6 hours). LoRa airtime
 // is precious; this is intentionally conservative.
 #define ADV_DEFAULT_ANNOUNCE_INTERVAL_S (6UL * 60UL * 60UL)
-// Initial delay after boot before the first announce — gives the radio,
-// transport and any TCP backbone time to come up.
-#define ADV_INITIAL_DELAY_MS            (60UL * 1000UL)
+// Tapering schedule of announce times measured from boot (not from the
+// previous announce -- each entry is an absolute offset, so a delayed
+// attempt doesn't push every later one back too): ~5s, 1min, 5min, 10min,
+// 15min, then the normal ADV_DEFAULT_ANNOUNCE_INTERVAL_S cycle from there.
+// See NomadNode.h's identical NOMADNODE_BOOT_SCHEDULE_MS for the full
+// reasoning (same confirmed-live findings apply to both announcers): the
+// 5s floor dodges a real settle-time race even though radio_online is
+// already true by then, and the taper beyond that replaces a flat 3-try
+// burst that could still all get lost to channel noise, leaving nothing
+// retry again for the full 6-hour interval.
+static const uint32_t ADV_BOOT_SCHEDULE_MS[] = {
+    5UL * 1000UL,
+    60UL * 1000UL,
+    5UL * 60UL * 1000UL,
+    10UL * 60UL * 1000UL,
+    15UL * 60UL * 1000UL,
+};
+#define ADV_BOOT_SCHEDULE_LEN (sizeof(ADV_BOOT_SCHEDULE_MS) / sizeof(ADV_BOOT_SCHEDULE_MS[0]))
 
 // Privacy jitter radius. ~half a kilometre / half a mile.
 #define ADV_JITTER_RADIUS_METERS 800.0
@@ -103,6 +118,8 @@ extern char     rtc_node_hash_hex[33];
 static RNS::Destination advertise_destination = {RNS::Type::NONE};
 static bool     advertise_initialised      = false;
 static bool     advertise_first_announce   = true;
+static uint32_t advertise_boot_ms              = 0;
+static uint8_t  advertise_boot_schedule_index  = 0;
 static uint32_t advertise_next_run_ms      = 0;
 static uint32_t advertise_announce_interval_ms = ADV_DEFAULT_ANNOUNCE_INTERVAL_S * 1000UL;
 
@@ -467,7 +484,15 @@ static void advertise_send(const RNS::Bytes& packed, const RNS::Bytes& stamp) {
     advertise_destination.announce(app_data);
 
     advertise_first_announce = false;
-    advertise_next_run_ms    = millis() + advertise_announce_interval_ms;
+    if (advertise_boot_schedule_index < ADV_BOOT_SCHEDULE_LEN) {
+        // Absolute offset from boot, not from "now" -- a late-firing attempt
+        // (channel contention) doesn't drag every later one in the taper
+        // back with it.
+        advertise_next_run_ms = advertise_boot_ms + ADV_BOOT_SCHEDULE_MS[advertise_boot_schedule_index];
+        advertise_boot_schedule_index++;
+    } else {
+        advertise_next_run_ms = millis() + advertise_announce_interval_ms;
+    }
 
     if (advertise_manual_inflight) {
         advertise_manual_inflight = false;
@@ -497,7 +522,13 @@ inline void advertise_init() {
 
     advertise_initialised    = true;
     advertise_first_announce = true;
-    advertise_next_run_ms    = millis() + ADV_INITIAL_DELAY_MS;
+    // Walk ADV_BOOT_SCHEDULE_MS rather than firing immediately or waiting
+    // the old fixed 60s -- see that array's own comment for why a true
+    // zero-delay attempt was confirmed live not to reliably get through
+    // even with radio_online already true.
+    advertise_boot_ms              = millis();
+    advertise_next_run_ms          = advertise_boot_ms + ADV_BOOT_SCHEDULE_MS[0];
+    advertise_boot_schedule_index  = 1;
     advertise_announce_interval_ms = ADV_DEFAULT_ANNOUNCE_INTERVAL_S * 1000UL;
 
 #if defined(ESP32)
@@ -505,8 +536,8 @@ inline void advertise_init() {
 #endif
 
     if (firewall_state.advert_enabled) {
-        RNS::info("[Advertise] Device advertisement ENABLED — first announce in ~" +
-                  std::to_string(ADV_INITIAL_DELAY_MS / 1000) + "s");
+        RNS::info("[Advertise] Device advertisement ENABLED — announcing in ~" +
+                  std::to_string(ADV_BOOT_SCHEDULE_MS[0] / 1000) + "s");
     } else {
         RNS::verbose("[Advertise] Device advertisement disabled (configure in portal to enable)");
     }

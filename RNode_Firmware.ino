@@ -3309,11 +3309,16 @@ void sleep_now() {
       #if BOARD_MODEL == BOARD_HELTEC32_V4
           headless_led_off();
           headless_led_detach_pwm();
-          #if defined(HELTEC_V4_R8)
-          if (!heltec_v4_r8())   // on an R8, GPIO46 is the LED
-          #endif
-          digitalWrite(LORA_PA_CPS, LOW);
-          if (lora_pa_model == LORA_PA_KCT8103L) {
+          if (lora_pa_model == LORA_PA_GC1109) {
+            // V4.2 GC1109: CPS is only ever configured as OUTPUT on this
+            // path (sx126x.cpp) -- writing it on a KCT8103L board hits
+            // the Arduino core's "not set as GPIO" guard, since it was
+            // never pinMode()'d there.
+            #if defined(HELTEC_V4_R8)
+            if (!heltec_v4_r8())   // on an R8, GPIO46 is the LED
+            #endif
+            digitalWrite(LORA_PA_CPS, LOW);
+          } else if (lora_pa_model == LORA_PA_KCT8103L) {
             // V4.3 KCT8103L: drop CTX so the FEM is in a known low state.
             digitalWrite(LORA_PA_CTX, LOW);
           }
