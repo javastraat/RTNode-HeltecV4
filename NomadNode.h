@@ -57,6 +57,20 @@ static bool     nomadnode_initialised     = false;
 static uint32_t nomadnode_next_announce_ms = 0;
 static bool     nomadnode_manual_pending   = false;
 
+static std::string rtnode_board_name() {
+#if BOARD_MODEL == BOARD_HELTEC32_V4
+    #if defined(HELTEC_V4_R8)
+        return "Heltec WiFi LoRa 32 V4 (R8)";
+    #else
+        return "Heltec WiFi LoRa 32 V4";
+    #endif
+#elif BOARD_MODEL == BOARD_HELTEC32_V3
+    return "Heltec WiFi LoRa 32 V3";
+#else
+    return "Unknown";
+#endif
+}
+
 static std::string nomadnode_name() {
     if (firewall_state.nomad_name[0] != '\0') return std::string(firewall_state.nomad_name);
     if (firewall_state.node_name[0] != '\0') return std::string(firewall_state.node_name);
@@ -147,7 +161,28 @@ static RNS::Bytes nomadnode_page_identity(const RNS::Bytes&, const RNS::Bytes&, 
     snprintf(line, sizeof(line), "Free heap: %u KB\n", (unsigned)(ESP.getFreeHeap() / 1024));
     mu += line;
     if (ESP.getPsramSize() > 0) {
-        snprintf(line, sizeof(line), "Free PSRAM: %u KB\n", (unsigned)(ESP.getFreePsram() / 1024));
+        snprintf(line, sizeof(line), "PSRAM: %u / %u KB free\n",
+                 (unsigned)(ESP.getFreePsram() / 1024), (unsigned)(ESP.getPsramSize() / 1024));
+        mu += line;
+    }
+
+    mu += "\n-\n\n";
+    mu += "Board: " + rtnode_board_name() + "\n";
+    snprintf(line, sizeof(line), "Chip: %s rev%d, %dC @ %uMHz\n",
+             ESP.getChipModel(), (int)ESP.getChipRevision(), (int)ESP.getChipCores(), (unsigned)ESP.getCpuFreqMHz());
+    mu += line;
+    snprintf(line, sizeof(line), "Flash: %u MB\n", (unsigned)(ESP.getFlashChipSize() / (1024UL * 1024UL)));
+    mu += line;
+#if HAS_LORA_PA
+    if (lora_pa_model != LORA_PA_UNKNOWN) {
+        mu += std::string("FEM: ") + (lora_pa_model == LORA_PA_KCT8103L ? "KCT8103L (V4.3)" : "GC1109 (V4.2)") + "\n";
+    }
+#endif
+    {
+        uint8_t mac[6];
+        WiFi.macAddress(mac);
+        snprintf(line, sizeof(line), "MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
         mu += line;
     }
 

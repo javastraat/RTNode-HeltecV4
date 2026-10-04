@@ -1452,6 +1452,12 @@ void ISR_VECT receive_callback(int packet_size) {
     BaseType_t int_mask;
   #endif
 
+  // Counts every physical LoRa frame the radio hands us -- a split packet
+  // (two frames reassembled into one logical packet, see below) counts as
+  // two, same as the "Packets RX" stat this feeds (NomadNode.h) is meant to
+  // show actual radio reception, not reassembled-packet bookkeeping.
+  stat_rx++;
+
   if (!promisc) {
     // The standard operating mode allows large
     // packets with a payload up to 500 bytes,
@@ -1847,6 +1853,7 @@ void transmit(uint16_t size) {
   res::Timed res_lora_tx(res::LORA_TX);
   VERBOSEF("[LoRa] TXSTART %u bytes", size);
   if (radio_online) {
+    stat_tx++;
     if (!promisc) {
       uint16_t  written = 0;
       uint8_t header  = random(256) & 0xF0;
@@ -1941,6 +1948,7 @@ void lora_tx_start_queued() {
     tbuf[i] = packet_queue[(start + i) % CONFIG_QUEUE_SIZE];
   }
   VERBOSEF("[LoRa] TXSTART %u bytes", length);
+  stat_tx++;
   lora_tx_job.active = true;
   lora_tx_job.header = random(256) & 0xF0;
   if (length > SINGLE_MTU - HEADER_L) { lora_tx_job.header |= FLAG_SPLIT; }
