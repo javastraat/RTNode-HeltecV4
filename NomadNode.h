@@ -260,6 +260,63 @@ public:
 // (and silently deregistered) as soon as nomadnode_init() returns.
 static RNS::HAnnounceHandler nodesheard_handler = std::make_shared<NodesHeardAnnounceHandler>();
 
+// ─── Peer census ─────────────────────────────────────────────────────────────
+// Deduplicated count of distinct peers heard announcing, any aspect -- not
+// just nomadnetwork.node like the table above. Mirrors meshpoint's own
+// "Known Peers / People / Infrastructure" split (reticulum_dashboard.js):
+// People = lxmf.delivery, Infrastructure = everything else. A destination
+// hash doesn't carry its aspect string in reverse, so each one is classified
+// by testing it against hash_from_name_and_identity("lxmf.delivery",
+// identity) -- the same test Transport itself runs internally for a
+// filtered handler. Caught via an AnnounceHandler with no aspect_filter
+// (empty = every aspect, see Transport.cpp's handler dispatch loop).
+// Fixed-size table, no eviction -- once full, new distinct peers simply
+// stop being counted rather than bumping out older ones (unlike
+// nodesheard_table, there's no "most recent" ordering this needs to
+// preserve). Trivial RAM cost (PEER_CENSUS_MAX * ~18 bytes) on a board
+// with 2MB PSRAM.
+#define PEER_CENSUS_MAX 128
+#define PEER_CENSUS_HASH_LEN 16
+
+struct PeerCensusEntry {
+    bool     used;
+    uint8_t  hash[PEER_CENSUS_HASH_LEN];
+};
+static PeerCensusEntry peer_census_table[PEER_CENSUS_MAX];
+static uint16_t peer_census_people_count = 0;
+static uint16_t peer_census_infra_count  = 0;
+
+static void peer_census_record(const RNS::Bytes& destination_hash, const RNS::Identity& identity) {
+    if (destination_hash.size() < PEER_CENSUS_HASH_LEN) return;
+    const uint8_t* hb = destination_hash.data();
+
+    int slot = -1;
+    for (int i = 0; i < PEER_CENSUS_MAX; i++) {
+        if (peer_census_table[i].used) {
+            if (memcmp(peer_census_table[i].hash, hb, PEER_CENSUS_HASH_LEN) == 0) return; // already counted
+        } else if (slot == -1) {
+            slot = i;
+        }
+    }
+    if (slot == -1) return; // table full
+
+    bool is_people = (RNS::Destination::hash_from_name_and_identity("lxmf.delivery", identity) == destination_hash);
+
+    PeerCensusEntry& e = peer_census_table[slot];
+    e.used = true;
+    memcpy(e.hash, hb, PEER_CENSUS_HASH_LEN);
+    if (is_people) peer_census_people_count++; else peer_census_infra_count++;
+}
+
+class PeerCensusAnnounceHandler : public RNS::AnnounceHandler {
+public:
+    PeerCensusAnnounceHandler() : RNS::AnnounceHandler() {} // no filter -- every aspect
+    virtual void received_announce(const RNS::Bytes& destination_hash, const RNS::Identity& identity, const RNS::Bytes&) override {
+        peer_census_record(destination_hash, identity);
+    }
+};
+static RNS::HAnnounceHandler peer_census_handler = std::make_shared<PeerCensusAnnounceHandler>();
+
 // ─── Pages (Micron markup) ───────────────────────────────────────────────────
 // Signature fixed by RNS::RequestHandler::response_generator — unused params
 // (path/data/request_id/link_id/remote_identity/requested_at) are required by
@@ -318,6 +375,9 @@ static RNS::Bytes nomadnode_page_stats(const RNS::Bytes&, const RNS::Bytes&, con
     mu_row(mu, "Packets RX", "%lu", (unsigned long)stat_rx);
     mu_row(mu, "Packets TX", "%lu", (unsigned long)stat_tx);
     mu_row(mu, "Queue depth", "%u", (unsigned)queue_height);
+    mu += "\n";
+    mu_row(mu, "People", "%u", (unsigned)peer_census_people_count);
+    mu_row(mu, "Infra ", "%u", (unsigned)peer_census_infra_count);
 
     mu += "\n`[<< Back`/page/index.mu]\n";
     return mu_finish(mu, "stats.mu");
@@ -604,6 +664,7 @@ inline void nomadnode_init() {
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/admin_reboot.mu"), nomadnode_page_admin_reboot, RNS::Type::Destination::ALLOW_ALL);
 
     RNS::Transport::register_announce_handler(nodesheard_handler);
+    RNS::Transport::register_announce_handler(peer_census_handler);
 
     nomadnode_initialised = true;
 
