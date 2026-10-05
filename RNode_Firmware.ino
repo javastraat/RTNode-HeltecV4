@@ -2991,6 +2991,7 @@ void loop() {
   if (reticulum) {
     advertise_loop();
     nomadnode_loop();
+    manual_burst_check();
   }
 #ifdef RTNODE_BLE
   if (reticulum) {
@@ -3358,6 +3359,27 @@ void sleep_now() {
   #endif
 }
 
+// Medium-hold burst announce: fires several manual announces a couple
+// seconds apart instead of just one, for when a single double-click isn't
+// cutting through a busy channel and you want decent odds without manually
+// double-clicking repeatedly (which risks landing a third click and
+// triggering sleep instead). Deferred through manual_burst_check() (called
+// from loop()) rather than blocking in button_event() with delay() calls,
+// since that would stall the radio/RNS processing for the whole burst.
+#define MANUAL_BURST_COUNT        5
+#define MANUAL_BURST_INTERVAL_MS  (2UL * 1000UL)
+static uint8_t  manual_burst_remaining = 0;
+static uint32_t manual_burst_next_ms   = 0;
+
+static void manual_burst_check() {
+  if (manual_burst_remaining == 0) return;
+  if ((int32_t)(millis() - manual_burst_next_ms) < 0) return;
+  advertise_request_now();
+  nomadnode_request_now();
+  manual_burst_remaining--;
+  manual_burst_next_ms = millis() + MANUAL_BURST_INTERVAL_MS;
+}
+
 void button_event(uint8_t event, unsigned long duration) {
   #if MCU_VARIANT == MCU_ESP32 || MCU_VARIANT == MCU_NRF52
     if (display_blanked) {
@@ -3366,7 +3388,7 @@ void button_event(uint8_t event, unsigned long duration) {
       #ifdef FIREWALL_MODE
       // Firewall Mode button mapping:
       //   >5s  = reboot into config mode (clean restart)
-      //   >700ms = no-op (see below)
+      //   >700ms = burst of manual announces (see below)
       //   short = double-click sends an announce, triple-click sleeps
       if (duration > 5000) {
         Serial.println("[Boundary] Button hold >5s — rebooting into config mode");
@@ -3377,8 +3399,14 @@ void button_event(uint8_t event, unsigned long duration) {
         // A medium hold used to trigger sleep directly here -- too easy to
         // hit by accident (a single press held slightly too long), which is
         // dangerous on a repeater with no physical access once it's asleep.
-        // Sleep now requires a deliberate triple-click instead (below); a
-        // medium hold alone does nothing.
+        // Sleep now requires a deliberate triple-click instead (below), so
+        // this slot was free -- repurposed for a burst of manual announces
+        // (low risk to trigger by accident: worst case a few extra packets
+        // on an already-busy channel, nothing like accidentally sleeping an
+        // unreachable repeater).
+        Serial.println("[Boundary] Medium hold — sending a burst of manual announces");
+        manual_burst_remaining = MANUAL_BURST_COUNT;
+        manual_burst_next_ms = millis();
       } else {
         // Click counting within a 400ms window: double-click sends an
         // announce right away, regardless of the "Advertise Device" portal
