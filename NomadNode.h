@@ -58,8 +58,12 @@ extern char     rtc_node_hash_hex[33];
 #define NOMADNODE_ANNOUNCE_INTERVAL_S (30UL * 60UL)
 // Tapering schedule of announce times measured from boot (not from the
 // previous announce -- each entry is an absolute offset, so a delayed
-// attempt doesn't push every later one back too): ~5s, 1min, 5min, 10min,
-// 15min, then the normal NOMADNODE_ANNOUNCE_INTERVAL_S cycle from there.
+// attempt doesn't push every later one back too): ~5s, 1min, 2min, 5min,
+// 8min, 10min, 12min, 15min, then the normal NOMADNODE_ANNOUNCE_INTERVAL_S
+// cycle from there. More points than the original 5, still spread out
+// rather than clustered (see below) -- a confirmed live ~40% single-shot
+// delivery rate on a busy channel means each extra independent attempt in
+// this window meaningfully raises the odds at least one gets through.
 //
 // The 5s floor is a real settle time, not zero -- confirmed live that
 // firing the instant radio_online goes true (inside nomadnode_init(),
@@ -77,8 +81,11 @@ extern char     rtc_node_hash_hex[33];
 static const uint32_t NOMADNODE_BOOT_SCHEDULE_MS[] = {
     5UL * 1000UL,
     60UL * 1000UL,
+    2UL * 60UL * 1000UL,
     5UL * 60UL * 1000UL,
+    8UL * 60UL * 1000UL,
     10UL * 60UL * 1000UL,
+    12UL * 60UL * 1000UL,
     15UL * 60UL * 1000UL,
 };
 #define NOMADNODE_BOOT_SCHEDULE_LEN (sizeof(NOMADNODE_BOOT_SCHEDULE_MS) / sizeof(NOMADNODE_BOOT_SCHEDULE_MS[0]))
