@@ -83,6 +83,12 @@ static const uint32_t NOMADNODE_BOOT_SCHEDULE_MS[] = {
 };
 #define NOMADNODE_BOOT_SCHEDULE_LEN (sizeof(NOMADNODE_BOOT_SCHEDULE_MS) / sizeof(NOMADNODE_BOOT_SCHEDULE_MS[0]))
 
+// Resolved once in nomadnode_init() from firewall_state.nomad_announce_interval_min
+// (portal-configurable; 0 = keep the NOMADNODE_ANNOUNCE_INTERVAL_S default)
+// -- lets an operator run a short interval on the bench for testing and a
+// longer one once deployed, without a reflash.
+static uint32_t nomadnode_announce_interval_s = NOMADNODE_ANNOUNCE_INTERVAL_S;
+
 static RNS::Destination nomadnode_destination = {RNS::Type::NONE};
 static bool     nomadnode_initialised     = false;
 static uint32_t nomadnode_boot_ms              = 0;
@@ -284,6 +290,8 @@ static RNS::Bytes nomadnode_page_config(const RNS::Bytes&, const RNS::Bytes&, co
     }
     mu_row(mu, "IFAC", firewall_state.ifac_enabled ? "on" : "off");
     mu_row(mu, "Advertise", firewall_state.advert_enabled ? "on (map)" : "off");
+    mu_row(mu, "Nomad announce", "every %lumin", (unsigned long)(nomadnode_announce_interval_s / 60));
+    mu_row(mu, "Advert announce", "every %lumin", (unsigned long)(advertise_announce_interval_ms / 60000UL));
 #ifdef RTNODE_BLE
     mu_row(mu, "Bluetooth", "%s (%u peers)", firewall_state.ble_running ? "on" : "off", (unsigned)firewall_state.ble_peers);
 #endif
@@ -474,11 +482,13 @@ inline void nomadnode_init() {
     // schedule above (NOMADNODE_BOOT_SCHEDULE_MS) instead of a single
     // fixed delay avoids reintroducing the original half-hour-stale
     // problem if an early attempt or two gets lost to channel noise.
+    nomadnode_announce_interval_s = firewall_nomad_announce_interval_s(NOMADNODE_ANNOUNCE_INTERVAL_S);
     nomadnode_boot_ms             = millis();
     nomadnode_next_announce_ms    = nomadnode_boot_ms + NOMADNODE_BOOT_SCHEDULE_MS[0];
     nomadnode_boot_schedule_index = 1;
 
-    RNS::info("[NomadNode] Node page server ready: " + nomadnode_name());
+    RNS::info("[NomadNode] Node page server ready: " + nomadnode_name() +
+              " (announce every " + std::to_string(nomadnode_announce_interval_s / 60) + "min)");
 }
 
 // Request an announce as soon as possible, bypassing the periodic interval
@@ -518,7 +528,7 @@ inline void nomadnode_loop() {
         nomadnode_next_announce_ms = nomadnode_boot_ms + NOMADNODE_BOOT_SCHEDULE_MS[nomadnode_boot_schedule_index];
         nomadnode_boot_schedule_index++;
     } else {
-        nomadnode_next_announce_ms = now + (NOMADNODE_ANNOUNCE_INTERVAL_S * 1000UL);
+        nomadnode_next_announce_ms = now + (nomadnode_announce_interval_s * 1000UL);
     }
 }
 

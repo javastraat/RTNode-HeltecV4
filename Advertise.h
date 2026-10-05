@@ -529,7 +529,7 @@ inline void advertise_init() {
     advertise_boot_ms              = millis();
     advertise_next_run_ms          = advertise_boot_ms + ADV_BOOT_SCHEDULE_MS[0];
     advertise_boot_schedule_index  = 1;
-    advertise_announce_interval_ms = ADV_DEFAULT_ANNOUNCE_INTERVAL_S * 1000UL;
+    advertise_announce_interval_ms = firewall_advert_announce_interval_s(ADV_DEFAULT_ANNOUNCE_INTERVAL_S) * 1000UL;
 
 #if defined(ESP32)
     advertise_load_stamp();
@@ -537,7 +537,8 @@ inline void advertise_init() {
 
     if (firewall_state.advert_enabled) {
         RNS::info("[Advertise] Device advertisement ENABLED — announcing in ~" +
-                  std::to_string(ADV_BOOT_SCHEDULE_MS[0] / 1000) + "s");
+                  std::to_string(ADV_BOOT_SCHEDULE_MS[0] / 1000) + "s, every " +
+                  std::to_string(advertise_announce_interval_ms / 60000UL) + "min thereafter");
     } else {
         RNS::verbose("[Advertise] Device advertisement disabled (configure in portal to enable)");
     }

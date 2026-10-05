@@ -276,6 +276,17 @@ static void config_send_html() {
     html += F("'>");
 
     html += F(
+        "<p class='note'>How often the NomadNet node re-announces itself once settled "
+        "(it also announces a few extra times right after boot, tapering off). Shorter "
+        "is handy for bench testing; longer saves shared airtime once deployed. "
+        "0 = default (30 min).</p>"
+        "<label>Announce interval (minutes)</label>"
+        "<input name='nomad_announce_min' type='number' min='0' max='1440' value='"
+    );
+    html += String(firewall_state.nomad_announce_interval_min);
+    html += F("'>");
+
+    html += F(
         "<h2>&#x1f512; Admin Actions</h2>"
         "<p class='note'>Password for the NomadNet page's admin actions "
         "(reboot, etc. — see the node's own <code>/page/admin.mu</code>), "
@@ -586,6 +597,16 @@ static void config_send_html() {
     html += F(">Enabled</option>");
     html += F("</select>");
 
+    html += F(
+        "<p class='note'>How often this device re-announces itself once settled "
+        "(it also announces a few extra times right after boot, tapering off). "
+        "0 = default (360 min / 6h).</p>"
+        "<label>Announce interval (minutes)</label>"
+        "<input name='advert_announce_min' type='number' min='0' max='1440' value='"
+    );
+    html += String(firewall_state.advert_announce_interval_min);
+    html += F("'>");
+
     // Latitude / Longitude — pre-populate with current values, but keep
     // the inputs blank when the user has not yet set coordinates so the
     // browser placeholder hint is visible.
@@ -805,6 +826,12 @@ static void config_handle_save() {
 
     // ── Device advertisement settings ──
     firewall_state.advert_enabled = (config_server->arg("advert_en").toInt() == 1);
+    {
+        long m = config_server->arg("advert_announce_min").toInt();
+        if (m < 0) m = 0;
+        if (m > 1440) m = 1440;
+        firewall_state.advert_announce_interval_min = (uint16_t)m;
+    }
 
     // Empty lat/lon strings are treated as "not set" → 0.0. Text that does
     // not parse, or lies outside the valid range, is coerced to 0.0 rather
@@ -845,6 +872,13 @@ static void config_handle_save() {
     strncpy(firewall_state.nomad_name, nomad_name_arg.c_str(), sizeof(firewall_state.nomad_name) - 1);
 
     // ── NomadNet admin-pages password (blank = disabled) ──
+    {
+        long m = config_server->arg("nomad_announce_min").toInt();
+        if (m < 0) m = 0;
+        if (m > 1440) m = 1440;
+        firewall_state.nomad_announce_interval_min = (uint16_t)m;
+    }
+
     String admin_password_arg = config_server->arg("admin_password");
     memset(firewall_state.admin_password, 0, sizeof(firewall_state.admin_password));
     strncpy(firewall_state.admin_password, admin_password_arg.c_str(), sizeof(firewall_state.admin_password) - 1);

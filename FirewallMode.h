@@ -128,7 +128,14 @@
 // every request, i.e. admin actions are off by default until a password
 // is set in the portal.
 #define ADDR_CONF_ADMIN_PASSWORD 0x260 // 33 bytes, null-terminated; empty = admin pages disabled
-// Total: 0x281 (641 bytes — still within the extended CONFIG area used on ESP32)
+// Steady-state announce intervals, in minutes (2 bytes, big-endian; 0 or
+// 0xFFFF = unset -> firmware default). Separate knobs for the two
+// announcers (NomadNode.h / Advertise.h) -- different purposes, different
+// useful test-vs-deploy values (e.g. a few minutes at home on the bench,
+// the normal low-airtime interval once it's up on a roof and unattended).
+#define ADDR_CONF_NOMAD_ANNOUNCE_MIN  0x281 // NomadNet announce interval, minutes (default 30)
+#define ADDR_CONF_ADVERT_ANNOUNCE_MIN 0x283 // General Advertise announce interval, minutes (default 360 = 6h)
+// Total: 0x285 (645 bytes — still within the extended CONFIG area used on ESP32)
 
 #define FIREWALL_ENABLE_BYTE 0x73
 #define FIREWALL_APP_MARKER0 0x52
@@ -178,6 +185,8 @@ struct FirewallState {
     char     node_name[33];   // Human-readable name (empty = auto from node hash)
     char     nomad_name[33];  // NomadNet node name (empty = falls back to node_name)
     char     admin_password[33]; // NomadNet admin action pages (empty = disabled)
+    uint16_t nomad_announce_interval_min;  // 0 = default (30 min)
+    uint16_t advert_announce_interval_min; // 0 = default (360 min / 6h)
 
     // Airtime / duty-cycle limits, in fraction (0.0 = disabled, 0.01 = 1%).
     // Mirrored into the global st_airtime_limit / lt_airtime_limit at boot.
@@ -231,6 +240,26 @@ inline size_t firewall_backbone_connected_count() {
 
 inline bool firewall_any_backbone_enabled() {
     return firewall_backbone_enabled_count() > 0;
+}
+
+// Resolved steady-state announce intervals, in seconds -- 0 (unset) falls
+// back to the given default; any stored value is clamped to a sane range
+// (1 min .. 24h) so a bad/corrupt EEPROM value can't produce a 0-second
+// busy-loop or an absurdly large wait.
+inline uint32_t firewall_nomad_announce_interval_s(uint32_t default_s) {
+    uint16_t m = firewall_state.nomad_announce_interval_min;
+    if (m == 0) return default_s;
+    if (m < 1) m = 1;
+    if (m > 1440) m = 1440;
+    return (uint32_t)m * 60UL;
+}
+
+inline uint32_t firewall_advert_announce_interval_s(uint32_t default_s) {
+    uint16_t m = firewall_state.advert_announce_interval_min;
+    if (m == 0) return default_s;
+    if (m < 1) m = 1;
+    if (m > 1440) m = 1440;
+    return (uint32_t)m * 60UL;
 }
 
 // ─── Firewall Mode EEPROM Load/Save ─────────────────────────────────────────
@@ -333,6 +362,8 @@ inline void firewall_load_config() {
         firewall_state.node_name[0] = '\0';
         firewall_state.nomad_name[0] = '\0';
         firewall_state.admin_password[0] = '\0';
+        firewall_state.nomad_announce_interval_min = 0;
+        firewall_state.advert_announce_interval_min = 0;
         firewall_state.st_airtime_limit = 0.0f;
         firewall_state.lt_airtime_limit = 0.0f;
         st_airtime_limit = 0.0f;
@@ -473,6 +504,20 @@ inline void firewall_load_config() {
             if (firewall_state.admin_password[i] == (char)0xFF) firewall_state.admin_password[i] = '\0';
         }
         firewall_state.admin_password[32] = '\0';
+
+        firewall_state.nomad_announce_interval_min =
+            ((uint16_t)EEPROM.read(config_addr(ADDR_CONF_NOMAD_ANNOUNCE_MIN)) << 8) |
+            (uint16_t)EEPROM.read(config_addr(ADDR_CONF_NOMAD_ANNOUNCE_MIN + 1));
+        if (firewall_state.nomad_announce_interval_min == 0xFFFF) {
+            firewall_state.nomad_announce_interval_min = 0;
+        }
+
+        firewall_state.advert_announce_interval_min =
+            ((uint16_t)EEPROM.read(config_addr(ADDR_CONF_ADVERT_ANNOUNCE_MIN)) << 8) |
+            (uint16_t)EEPROM.read(config_addr(ADDR_CONF_ADVERT_ANNOUNCE_MIN + 1));
+        if (firewall_state.advert_announce_interval_min == 0xFFFF) {
+            firewall_state.advert_announce_interval_min = 0;
+        }
     }
 
     // Airtime limits (1 byte each, percent * 10; 0xFF = unset = disabled).
@@ -596,6 +641,11 @@ inline void firewall_save_config() {
         EEPROM.write(config_addr(ADDR_CONF_ADMIN_PASSWORD + i), firewall_state.admin_password[i]);
     }
     EEPROM.write(config_addr(ADDR_CONF_ADMIN_PASSWORD + 32), 0x00);
+
+    EEPROM.write(config_addr(ADDR_CONF_NOMAD_ANNOUNCE_MIN), (firewall_state.nomad_announce_interval_min >> 8) & 0xFF);
+    EEPROM.write(config_addr(ADDR_CONF_NOMAD_ANNOUNCE_MIN + 1), firewall_state.nomad_announce_interval_min & 0xFF);
+    EEPROM.write(config_addr(ADDR_CONF_ADVERT_ANNOUNCE_MIN), (firewall_state.advert_announce_interval_min >> 8) & 0xFF);
+    EEPROM.write(config_addr(ADDR_CONF_ADVERT_ANNOUNCE_MIN + 1), firewall_state.advert_announce_interval_min & 0xFF);
 
     // Airtime limits — clamp to 0.0–25.5% then encode as percent * 10.
     {
