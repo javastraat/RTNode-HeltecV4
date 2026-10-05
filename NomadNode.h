@@ -149,9 +149,13 @@ static void mu_row(std::string& mu, const char* label, const char* fmt, ...) {
 }
 
 // Centred name + subtitle banner, same shape as nomad_node.py's title block.
+// subtitle is shown verbatim -- each call site writes its own complete
+// phrase (e.g. "a NomadNet status node", but just "config", "hardware",
+// "nodes heard" for the rest), rather than this function gluing an
+// indefinite article onto every single one whether it reads naturally or not.
 static void mu_title(std::string& mu, const std::string& subtitle) {
     mu += "`c`F0a0`!" + nomadnode_name() + "`!`f`a\n";
-    mu += "`ca " + subtitle + "`a\n";
+    mu += "`c" + subtitle + "`a\n";
     mu += "-\n\n";
 }
 
@@ -183,6 +187,72 @@ static RNS::Bytes mu_finish(const std::string& mu, const char* page_name) {
     return RNS::Bytes(mu);
 }
 
+// ─── Nodes heard ─────────────────────────────────────────────────────────────
+// Other nomadnetwork.node peers this repeater has itself heard announce --
+// mirrors meshpoint's own "Nodes this Meshpoint has heard" page
+// (nomad_node.py's _serve_nodes), with one improvement: a real per-entry
+// "last heard" time, which that one doesn't show. Fixed-size ring, oldest
+// entry evicted once full -- trivial RAM cost (NODESHEARD_MAX * ~54 bytes)
+// on a board with 2MB PSRAM.
+#define NODESHEARD_MAX 16
+#define NODESHEARD_HASH_LEN 16 // TRUNCATED_HASHLENGTH/8, Type.h
+
+struct NodesHeardEntry {
+    bool     used;
+    uint8_t  hash[NODESHEARD_HASH_LEN];
+    char     name[24];
+    uint32_t last_seen_ms;
+};
+static NodesHeardEntry nodesheard_table[NODESHEARD_MAX];
+
+static void nodesheard_record(const RNS::Bytes& destination_hash, const RNS::Bytes& app_data) {
+    if (destination_hash.size() < NODESHEARD_HASH_LEN) return;
+    const uint8_t* hb = destination_hash.data();
+
+    int slot = -1;
+    int oldest = 0;
+    for (int i = 0; i < NODESHEARD_MAX; i++) {
+        if (nodesheard_table[i].used && memcmp(nodesheard_table[i].hash, hb, NODESHEARD_HASH_LEN) == 0) {
+            slot = i;
+            break;
+        }
+        if (!nodesheard_table[i].used) {
+            if (slot == -1) slot = i;
+        } else if (nodesheard_table[i].last_seen_ms < nodesheard_table[oldest].last_seen_ms) {
+            oldest = i;
+        }
+    }
+    if (slot == -1) slot = oldest; // table full -- evict the oldest entry
+
+    NodesHeardEntry& e = nodesheard_table[slot];
+    e.used = true;
+    memcpy(e.hash, hb, NODESHEARD_HASH_LEN);
+    e.last_seen_ms = millis();
+    // nomadnetwork.node announces carry the node's display name as raw
+    // UTF-8 app_data (NomadNet's own convention, same as this repeater's
+    // own announce in nomadnode_loop()) -- not a structured/LXMF payload.
+    if (app_data.size() > 0) {
+        size_t n = app_data.size();
+        if (n > sizeof(e.name) - 1) n = sizeof(e.name) - 1;
+        memcpy(e.name, app_data.data(), n);
+        e.name[n] = '\0';
+    } else {
+        e.name[0] = '\0';
+    }
+}
+
+class NodesHeardAnnounceHandler : public RNS::AnnounceHandler {
+public:
+    NodesHeardAnnounceHandler() : RNS::AnnounceHandler("nomadnetwork.node") {}
+    virtual void received_announce(const RNS::Bytes& destination_hash, const RNS::Identity&, const RNS::Bytes& app_data) override {
+        nodesheard_record(destination_hash, app_data);
+    }
+};
+// Kept alive for the program's lifetime -- Transport::register_announce_handler()
+// only stores the shared_ptr, so a local/temporary here would be destroyed
+// (and silently deregistered) as soon as nomadnode_init() returns.
+static RNS::HAnnounceHandler nodesheard_handler = std::make_shared<NodesHeardAnnounceHandler>();
+
 // ─── Pages (Micron markup) ───────────────────────────────────────────────────
 // Signature fixed by RNS::RequestHandler::response_generator — unused params
 // (path/data/request_id/link_id/remote_identity/requested_at) are required by
@@ -190,31 +260,43 @@ static RNS::Bytes mu_finish(const std::string& mu, const char* page_name) {
 
 static RNS::Bytes nomadnode_page_index(const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Identity&, double) {
     std::string mu;
-    mu_title(mu, "NomadNet status node");
+    mu_title(mu, "Welcome to the Repeater NomadNode");
 
-    mu += "A `!RTNode`! LoRa mesh repeater.\n\n";
-
-    char buf[48];
-    snprintf(buf, sizeof(buf), "`cRadio: %s   ·   Up %s`a\n\n",
-             radio_online ? "online" : "offline", mu_uptime().c_str());
+    // Kept deliberately terse -- nomadnode_name() can be up to 32 operator-
+    // set characters (FirewallMode.h), and this page's own budget has to
+    // hold up even at that worst case (see NOMADNODE_PAGE_BUDGET's notes).
+    //
+    // "Radio: online/offline" only shown when a TCP backbone is also
+    // enabled -- on a LoRa-only repeater it's close to redundant (you
+    // could only be viewing this page over LoRa if the radio were
+    // already online, so it'll essentially always read "online" the one
+    // time anyone actually sees it). With a backbone active, though, this
+    // page can be reached over that path even while the local LoRa radio
+    // itself has failed -- that's the one case this is real, new
+    // information rather than restating the obvious.
+    char buf[64];
+    if (firewall_any_backbone_enabled()) {
+        snprintf(buf, sizeof(buf), "`cRadio: %s   ·   Up %s`a\n\n",
+                 radio_online ? "online" : "offline", mu_uptime().c_str());
+    } else {
+        snprintf(buf, sizeof(buf), "`cUp %s`a\n\n", mu_uptime().c_str());
+    }
     mu += buf;
 
     mu += ">Pages\n";
     mu += "`[Stats`/page/stats.mu]\n";
     mu += "`[Info`/page/info.mu]\n";
     mu += "`[Hardware`/page/hardware.mu]\n";
+    mu += "`[Nodes`/page/nodes.mu]\n";
     mu += "`[Config`/page/config.mu]\n";
-    mu += "`[Advert`/page/advert.mu]\n\n";
-
-    mu += "-\n";
-    mu += "`c`F888Reach it on the mesh \xE2\x80\x94 LoRa or WiFi.`f`a\n";
+    mu += "`[Advert`/page/advert.mu]\n";
 
     return mu_finish(mu, "index.mu");
 }
 
 static RNS::Bytes nomadnode_page_stats(const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Identity&, double) {
     std::string mu;
-    mu_title(mu, "radio stats");
+    mu_title(mu, "Repeater radio stats");
 
     mu_row(mu, "Radio", radio_online ? "online" : "offline");
     if (radio_online) {
@@ -238,7 +320,7 @@ static RNS::Bytes nomadnode_page_stats(const RNS::Bytes&, const RNS::Bytes&, con
 // comment above for why.
 static RNS::Bytes nomadnode_page_info(const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Identity&, double) {
     std::string mu;
-    mu_title(mu, "node info");
+    mu_title(mu, "Repeater info");
 
     mu += ">Identity\n";
     mu_row(mu, "Hash", "%.16s",
@@ -253,7 +335,7 @@ static RNS::Bytes nomadnode_page_info(const RNS::Bytes&, const RNS::Bytes&, cons
 
 static RNS::Bytes nomadnode_page_hardware(const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Identity&, double) {
     std::string mu;
-    mu_title(mu, "hardware");
+    mu_title(mu, "Repeater hardware");
 
     mu_row(mu, "Board", rtnode_board_name());
     mu_row(mu, "Chip", "%s rev%d, %dC @ %uMHz",
@@ -278,9 +360,60 @@ static RNS::Bytes nomadnode_page_hardware(const RNS::Bytes&, const RNS::Bytes&, 
     return mu_finish(mu, "hardware.mu");
 }
 
+static RNS::Bytes nomadnode_page_nodes(const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Identity&, double) {
+    std::string mu;
+    mu_title(mu, "Nodes we heard");
+
+    uint32_t now = millis();
+    bool shown[NODESHEARD_MAX] = {false};
+    int shown_count = 0;
+
+    // How many entries actually fit varies with how long each one's name
+    // happens to be (a fixed row count either wastes room on short names
+    // or risks overflow on long ones) -- so this adds rows, most-recent
+    // first, until the NEXT one would push the page past budget, reserving
+    // room for the trailing back-link so that never gets squeezed out.
+    const size_t reserve_tail = 32;
+
+    for (int pick = 0; pick < NODESHEARD_MAX; pick++) {
+        int best = -1;
+        for (int i = 0; i < NODESHEARD_MAX; i++) {
+            if (!nodesheard_table[i].used || shown[i]) continue;
+            if (best == -1 || nodesheard_table[i].last_seen_ms > nodesheard_table[best].last_seen_ms) best = i;
+        }
+        if (best == -1) break;
+
+        NodesHeardEntry& e = nodesheard_table[best];
+        char hashhex[9];
+        snprintf(hashhex, sizeof(hashhex), "%02x%02x%02x%02x", e.hash[0], e.hash[1], e.hash[2], e.hash[3]);
+        std::string label = (e.name[0] != '\0') ? std::string(e.name) : std::string(hashhex);
+
+        uint32_t age_s = (now - e.last_seen_ms) / 1000UL;
+        char ago[8];
+        if (age_s < 60) snprintf(ago, sizeof(ago), "%lus", (unsigned long)age_s);
+        else if (age_s < 3600) snprintf(ago, sizeof(ago), "%lum", (unsigned long)(age_s / 60UL));
+        else snprintf(ago, sizeof(ago), "%luh", (unsigned long)(age_s / 3600UL));
+
+        char line[64];
+        snprintf(line, sizeof(line), "%s ago - %s\n", ago, label.c_str());
+
+        if (mu.size() + strlen(line) + reserve_tail > NOMADNODE_PAGE_BUDGET) break;
+
+        shown[best] = true;
+        shown_count++;
+        mu += line;
+    }
+    if (shown_count == 0) {
+        mu += "(none yet -- no nomadnetwork.node announce heard)\n";
+    }
+
+    mu += "\n`[<< Back`/page/index.mu]\n";
+    return mu_finish(mu, "nodes.mu");
+}
+
 static RNS::Bytes nomadnode_page_config(const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Identity&, double) {
     std::string mu;
-    mu_title(mu, "config");
+    mu_title(mu, "Repeater config");
 
     mu_row(mu, "WiFi", firewall_state.wifi_enabled ? "on" : "off");
     if (firewall_state.backbones[0].enabled) {
@@ -313,7 +446,7 @@ static uint32_t nomadnode_advert_page_last_ms = 0;
 
 static RNS::Bytes nomadnode_page_advert(const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Identity&, double) {
     std::string mu;
-    mu_title(mu, "advert");
+    mu_title(mu, "Repeater advertise");
 
     uint32_t now = millis();
     if (now - nomadnode_advert_page_last_ms < NOMADNODE_ADVERT_PAGE_COOLDOWN_MS) {
@@ -456,11 +589,14 @@ inline void nomadnode_init() {
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/stats.mu"),    nomadnode_page_stats,    RNS::Type::Destination::ALLOW_ALL);
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/info.mu"),     nomadnode_page_info,     RNS::Type::Destination::ALLOW_ALL);
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/hardware.mu"), nomadnode_page_hardware, RNS::Type::Destination::ALLOW_ALL);
+    nomadnode_destination.register_request_handler(RNS::Bytes("/page/nodes.mu"),    nomadnode_page_nodes,    RNS::Type::Destination::ALLOW_ALL);
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/config.mu"),   nomadnode_page_config,   RNS::Type::Destination::ALLOW_ALL);
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/advert.mu"),   nomadnode_page_advert,   RNS::Type::Destination::ALLOW_ALL);
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/admin.mu"),        nomadnode_page_admin,        RNS::Type::Destination::ALLOW_ALL);
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/admin_advert.mu"), nomadnode_page_admin_advert, RNS::Type::Destination::ALLOW_ALL);
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/admin_reboot.mu"), nomadnode_page_admin_reboot, RNS::Type::Destination::ALLOW_ALL);
+
+    RNS::Transport::register_announce_handler(nodesheard_handler);
 
     nomadnode_initialised = true;
 
