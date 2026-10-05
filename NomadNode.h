@@ -654,6 +654,8 @@ inline void nomadnode_loop() {
     int32_t delta = (int32_t)(now - nomadnode_next_announce_ms);
     if (delta < 0 && !nomadnode_manual_pending) return;
 
+    RNS::verbose(std::string("[NomadNode] Sending announce (") + (nomadnode_manual_pending ? "manual" : "scheduled")
+        + "), name: \"" + nomadnode_name() + "\"");
     nomadnode_destination.announce(RNS::Bytes(nomadnode_name()));
     nomadnode_manual_pending = false;
 
