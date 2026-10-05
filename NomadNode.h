@@ -377,7 +377,7 @@ static RNS::Bytes nomadnode_page_stats(const RNS::Bytes&, const RNS::Bytes&, con
     mu_row(mu, "Queue depth", "%u", (unsigned)queue_height);
     mu += "\n";
     mu_row(mu, "People", "%u", (unsigned)peer_census_people_count);
-    mu_row(mu, "Infra ", "%u", (unsigned)peer_census_infra_count);
+    mu_row(mu, "Infrastructure", "%u", (unsigned)peer_census_infra_count);
 
     mu += "\n`[<< Back`/page/index.mu]\n";
     return mu_finish(mu, "stats.mu");
@@ -550,6 +550,22 @@ static bool admin_password_ok(const RNS::Bytes& data) {
     if (firewall_state.admin_password[0] == '\0') return false;
     if (data.size() == 0) return false;
 
+    // TEMPORARY diagnostic -- the field-submission format below was never
+    // live-verified against a real client (see this function's own history);
+    // this dumps exactly what was received so a failed attempt is debuggable
+    // instead of a silent "Wrong password." Remove once confirmed working.
+    {
+        std::string hex;
+        size_t n = data.size() < 64 ? data.size() : 64;
+        char b[4];
+        for (size_t i = 0; i < n; i++) {
+            snprintf(b, sizeof(b), "%02x ", data.data()[i]);
+            hex += b;
+        }
+        RNS::verbose("[AdminAuth] raw data (" + std::to_string(data.size()) + " bytes): " + hex
+            + (data.size() > n ? "..." : ""));
+    }
+
     // MsgPack::str_t is Arduino's String on this build (Types.h), not
     // std::string -- std::map<std::string, std::string> compiles but the
     // library's unpack() can't actually fill a plain std::string value,
@@ -557,11 +573,24 @@ static bool admin_password_ok(const RNS::Bytes& data) {
     MsgPack::Unpacker unpacker;
     unpacker.feed(data.data(), data.size());
     std::map<MsgPack::str_t, MsgPack::str_t> fields;
-    if (!unpacker.unpack(fields)) return false;
+    if (!unpacker.unpack(fields)) {
+        RNS::verbose("[AdminAuth] msgpack unpack into map<str,str> failed");
+        return false;
+    }
+
+    RNS::verbose("[AdminAuth] unpacked " + std::to_string(fields.size()) + " field(s):");
+    for (auto& kv : fields) {
+        RNS::verbose("[AdminAuth]   \"" + std::string(kv.first.c_str()) + "\" = \"" + std::string(kv.second.c_str()) + "\"");
+    }
 
     auto it = fields.find("field_password");
-    if (it == fields.end()) return false;
-    return it->second == firewall_state.admin_password;
+    if (it == fields.end()) {
+        RNS::verbose("[AdminAuth] no \"field_password\" key in submission");
+        return false;
+    }
+    bool match = (it->second == firewall_state.admin_password);
+    RNS::verbose(std::string("[AdminAuth] password match: ") + (match ? "yes" : "no"));
+    return match;
 }
 
 // Shared login-form body for every admin_*.mu page -- submits back to

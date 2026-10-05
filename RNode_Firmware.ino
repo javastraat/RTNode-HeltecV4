@@ -3366,33 +3366,51 @@ void button_event(uint8_t event, unsigned long duration) {
       #ifdef FIREWALL_MODE
       // Firewall Mode button mapping:
       //   >5s  = reboot into config mode (clean restart)
-      //   >700ms = sleep
-      //   short = display unblank
+      //   >700ms = no-op (see below)
+      //   short = double-click sends an announce, triple-click sleeps
       if (duration > 5000) {
         Serial.println("[Boundary] Button hold >5s — rebooting into config mode");
         boundary_config_request = BOUNDARY_CONFIG_MAGIC;
         delay(100);
         ESP.restart();
       } else if (duration > 700) {
-        #if HAS_SLEEP
-          sleep_now();
-        #endif
+        // A medium hold used to trigger sleep directly here -- too easy to
+        // hit by accident (a single press held slightly too long), which is
+        // dangerous on a repeater with no physical access once it's asleep.
+        // Sleep now requires a deliberate triple-click instead (below); a
+        // medium hold alone does nothing.
       } else {
-        // Double-click (two short clicks within 400ms): send an announce
-        // right away, regardless of the "Advertise Device" portal setting.
-        // Also re-announces the Nomad Network status node (NomadNode.h) --
-        // otherwise it only re-announces on its own independent 30-minute
-        // timer, which can leave a fresh listener with no path to it for a
-        // while even though the device itself just announced loud and clear.
+        // Click counting within a 400ms window: double-click sends an
+        // announce right away, regardless of the "Advertise Device" portal
+        // setting (also re-announces the Nomad Network status node --
+        // NomadNode.h -- otherwise it only re-announces on its own
+        // independent 30-minute timer, which can leave a fresh listener
+        // with no path to it for a while even though the device itself
+        // just announced loud and clear). A third click within the same
+        // window escalates to sleep -- deliberately harder to trigger by
+        // accident than the old single-hold version, since it stacks on
+        // top of the double-click firing the announce first.
         static uint32_t last_short_click_ms = 0;
+        static uint8_t  short_click_count = 0;
         uint32_t now = millis();
         if (last_short_click_ms != 0 && (now - last_short_click_ms) <= 400) {
-          last_short_click_ms = 0;
+          short_click_count++;
+        } else {
+          short_click_count = 1;
+        }
+        last_short_click_ms = now;
+
+        if (short_click_count == 2) {
           Serial.println("[Boundary] Double-click — sending manual announce");
           advertise_request_now();
           nomadnode_request_now();
-        } else {
-          last_short_click_ms = now;
+        } else if (short_click_count == 3) {
+          Serial.println("[Boundary] Triple-click — going to sleep");
+          short_click_count = 0;
+          last_short_click_ms = 0;
+          #if HAS_SLEEP
+            sleep_now();
+          #endif
         }
         display_unblank();
       }
