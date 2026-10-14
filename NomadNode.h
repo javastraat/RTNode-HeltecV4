@@ -509,6 +509,8 @@ static RNS::Bytes nomadnode_page_info(const RNS::Bytes&, const RNS::Bytes&, cons
     mu_row(mu, "Firmware", "v%d.%d", (int)MAJ_VERS, (int)MIN_VERS);
     mu_row(mu, "Uptime", mu_uptime());
     mu_row(mu, "Free heap", "%u KB", (unsigned)(ESP.getFreeHeap() / 1024));
+    mu += "\n>Power\n";
+    mu_battery(mu);
 
     mu += "\n`[<< Back`/page/index.mu]\n";
     return mu_finish(mu, "info.mu");
