@@ -805,6 +805,37 @@ void Link::handle_response(const Bytes& request_id, const Bytes& response_data, 
 	}
 }
 
+// Real Reticulum clients (RNS/Link.py's own request()) pack a request as
+// the fixed 3-element array [time.time(), path_hash, data], with `data`
+// embedded as whatever raw msgpack type it actually is -- nil for "no
+// data", or a genuine map for form-field submissions -- never wrapped in
+// a `bin` envelope. MsgPack::Unpacker::from_array() needs a fixed type
+// per slot, so decoding that 3rd slot as bin_t (as if `data` were always
+// binary) throws a type error and silently returns empty for anything
+// else -- confirmed live: this discarded every submitted NomadNet form
+// field (e.g. NomadNode.h's admin_reboot.mu password), not just malformed
+// ones. Recovering the raw bytes of an arbitrary-typed value isn't
+// exposed by the Unpacker's public API (and the vendored MsgPack library
+// itself -- hideakitai/MsgPack via PlatformIO's registry -- isn't ours to
+// patch), but the wire layout up to that point is fully deterministic: a
+// 3-element array is always a 1-byte fixarray header; a Python float is
+// always msgpack FLOAT64 (1-byte tag + 8 bytes); and a Reticulum
+// truncated hash is always small enough to be BIN8 (1-byte tag + 1-byte
+// length + N bytes). So the byte offset where `data` begins can be
+// computed directly, and everything from there to the end of the buffer
+// IS `data`'s raw encoding, whatever its type -- callers that need to
+// interpret it (e.g. NomadNode.h's admin_password_ok(), which already
+// re-unpacks `data` itself as a nested field map) can feed it to their
+// own fresh Unpacker. Falls back to empty on anything that doesn't match
+// these assumptions, same as the previous (broken-for-non-bin) behavior.
+static Bytes request_data_raw_from_packed(const Bytes& packed_request, size_t path_hash_size) {
+	const size_t consumed = 1 /* fixarray header */ + 9 /* FLOAT64 requested_at */ + 2 /* BIN8 header */ + path_hash_size;
+	if (packed_request.size() <= consumed) {
+		return Bytes();
+	}
+	return packed_request.mid(consumed);
+}
+
 void Link::request_resource_concluded(const Resource& resource) {
 	assert(_object);
 	if (resource.status() == Type::Resource::COMPLETE) {
@@ -814,12 +845,11 @@ void Link::request_resource_concluded(const Resource& resource) {
 		// CBA TODO OPTIMIZE MSGPACK
 		double requested_at;
 		MsgPack::bin_t<uint8_t> path_hash;
-		MsgPack::bin_t<uint8_t> request_data;
-		unpacker.from_array(requested_at, path_hash, request_data);
+		unpacker.from_array(requested_at, path_hash);
 		ResourceRequest resource_request;
 		resource_request._requested_at = requested_at;
 		resource_request._path_hash = path_hash;
-		resource_request._request_data = request_data;
+		resource_request._request_data = request_data_raw_from_packed(packed_request, path_hash.size());
 		Bytes request_id(Identity::truncated_hash(resource.data()));
 
 		handle_request(request_id, resource_request);
@@ -960,12 +990,11 @@ void Link::receive(const Packet& packet) {
 							// CBA TODO OPTIMIZE MSGPACK
 							double requested_at;
 							MsgPack::bin_t<uint8_t> path_hash;
-							MsgPack::bin_t<uint8_t> request_data;
-							unpacker.from_array(requested_at, path_hash, request_data);
+							unpacker.from_array(requested_at, path_hash);
 							ResourceRequest resource_request;
 							resource_request._requested_at = requested_at;
 							resource_request._path_hash = path_hash;
-							resource_request._request_data = request_data;
+							resource_request._request_data = request_data_raw_from_packed(packed_request, path_hash.size());
 							handle_request(request_id, resource_request);
 						}
 					}

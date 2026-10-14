@@ -550,22 +550,6 @@ static bool admin_password_ok(const RNS::Bytes& data) {
     if (firewall_state.admin_password[0] == '\0') return false;
     if (data.size() == 0) return false;
 
-    // TEMPORARY diagnostic -- the field-submission format below was never
-    // live-verified against a real client (see this function's own history);
-    // this dumps exactly what was received so a failed attempt is debuggable
-    // instead of a silent "Wrong password." Remove once confirmed working.
-    {
-        std::string hex;
-        size_t n = data.size() < 64 ? data.size() : 64;
-        char b[4];
-        for (size_t i = 0; i < n; i++) {
-            snprintf(b, sizeof(b), "%02x ", data.data()[i]);
-            hex += b;
-        }
-        RNS::verbose("[AdminAuth] raw data (" + std::to_string(data.size()) + " bytes): " + hex
-            + (data.size() > n ? "..." : ""));
-    }
-
     // MsgPack::str_t is Arduino's String on this build (Types.h), not
     // std::string -- std::map<std::string, std::string> compiles but the
     // library's unpack() can't actually fill a plain std::string value,
@@ -597,9 +581,22 @@ static bool admin_password_ok(const RNS::Bytes& data) {
 // whichever exact path it was served from (RNS matches by exact path, so
 // each action is its own registered handler rather than one page with an
 // action selector).
+//
+// Field-bundling confirmed against the real NomadNet client source
+// (nomadnet/ui/textui/Browser.py + MicronParser.py): a submit link only
+// bundles a field into the request if that field's bare name is listed as
+// a third backtick-separated segment on the link itself -- `[label`url`
+// name] -- bundling is NOT automatic for every field defined on the page,
+// which is what the previous version of this function assumed (it also
+// named the field "field_password" instead of "password", so even an
+// explicit field list would have named the wrong field). The client
+// always prefixes the bundled value with "field_" when building the
+// request map, so admin_password_ok()'s "field_password" lookup was
+// already correct -- the field's own name must be the un-prefixed
+// "password". "!" before the "|" masks the input (not echoed on screen).
 static void admin_login_form(std::string& mu, const char* self_path) {
-    mu += "`<field_password`>\n\n";
-    mu += std::string("`[Submit`") + self_path + "]\n";
+    mu += "`<!|password`>\n\n";
+    mu += std::string("`[Submit`") + self_path + "`password]\n";
 }
 
 static RNS::Bytes nomadnode_page_admin(const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Identity&, double) {
