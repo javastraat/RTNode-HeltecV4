@@ -42,6 +42,10 @@ extern uint32_t stat_rx;
 extern uint32_t stat_tx;
 extern bool     radio_online;
 extern volatile uint8_t queue_height;
+extern bool     battery_installed;
+extern float    battery_voltage;
+extern float    battery_percent;
+extern uint8_t  battery_state;
 
 // Cached node-hash hex string in RTC memory (see RNode_Firmware.ino / Advertise.h).
 #ifndef NODE_HASH_RTC_MAGIC
@@ -172,6 +176,28 @@ static std::string mu_uptime() {
     snprintf(buf, sizeof(buf), "%lud %luh %lum",
              (unsigned long)(up_s / 86400UL), (unsigned long)((up_s % 86400UL) / 3600UL), (unsigned long)((up_s % 3600UL) / 60UL));
     return std::string(buf);
+}
+
+// Battery gauge -- same visual language as microReticulum_Firmware's
+// ScotMesh.h P_battery(): a 10-block colour-coded bar (red <25%, amber
+// <50%, green above), percentage, voltage, and a charge/discharge arrow.
+// No-op on boards with no battery sensing (mains-only Heltec), so this
+// adds nothing to the page budget there.
+static void mu_battery(std::string& mu) {
+    if (!battery_installed) return;
+    int pct = (int)(battery_percent + 0.5f);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    int filled = (pct + 5) / 10;
+    bool charging = (battery_state == BATTERY_STATE_CHARGING || battery_state == BATTERY_STATE_CHARGED);
+
+    mu += ">Battery\n`F";
+    mu += (pct < 25) ? "f55" : (pct < 50) ? "da3" : "2c5";
+    for (int i = 0; i < 10; i++) mu += (i < filled) ? "\xE2\x96\x88" : "\xE2\x96\x91";
+    char tail[40];
+    snprintf(tail, sizeof(tail), "`f %d%% %.2fV %s\n", pct, (double)battery_voltage,
+             charging ? "`F2c5\xE2\x96\xB2`f" : "`Fda3\xE2\x96\xBC`f");
+    mu += tail;
 }
 
 // Conservative raw-page-text ceiling, with margin below the real cutoff: a
@@ -317,6 +343,91 @@ public:
 };
 static RNS::HAnnounceHandler peer_census_handler = std::make_shared<PeerCensusAnnounceHandler>();
 
+// ─── People heard ────────────────────────────────────────────────────────────
+// Mirrors "Nodes heard" above exactly (same fixed-size, oldest-evicted ring,
+// same per-entry "last heard" time), but for lxmf.delivery peers (people)
+// instead of nomadnetwork.node peers (infrastructure) -- the "Infrastructure"
+// side of the Stats page's People/Infrastructure split doesn't get an
+// equivalent list here, only People, to match what was actually asked for.
+//
+// Unlike a nomadnetwork.node announce, lxmf.delivery app_data isn't raw
+// UTF-8 -- LXMF wraps it as a msgpack array, [display_name|nil,
+// stamp_cost|nil, supported_functionality] (LXMRouter.get_announce_app_data()
+// in the LXMF python reference), with display_name, when the person set
+// one, as UTF-8 bytes (a msgpack `bin`, not `str`). Only the first element
+// is read here. This is a closed set of exactly two possible types for
+// that element (nil or bin) -- nothing like the unconstrained "whatever
+// type the sender felt like" problem Link.cpp's request-data unpacking
+// hit, so no byte-offset trick is needed, just a type check before the
+// typed unpack: a peer with no display name set encodes it as nil, and
+// unpacking nil into a bin_t would otherwise throw a logged error on every
+// single anonymous peer heard (same unpackBinary() behavior that broke
+// admin auth) -- checking the type first avoids that error entirely
+// rather than relying on its empty-result fallback.
+#define PEOPLEHEARD_MAX 16
+#define PEOPLEHEARD_HASH_LEN 16 // TRUNCATED_HASHLENGTH/8, Type.h
+
+struct PeopleHeardEntry {
+    bool     used;
+    uint8_t  hash[PEOPLEHEARD_HASH_LEN];
+    char     name[24];
+    uint32_t last_seen_ms;
+};
+static PeopleHeardEntry peopleheard_table[PEOPLEHEARD_MAX];
+
+static void lxmf_display_name(const RNS::Bytes& app_data, char* out, size_t out_size) {
+    out[0] = '\0';
+    if (app_data.size() == 0) return;
+    MsgPack::Unpacker unpacker;
+    unpacker.feed(app_data.data(), app_data.size());
+    unpacker.unpackArraySize();
+    MsgPack::Type t = unpacker.getType();
+    if (t != MsgPack::Type::BIN8 && t != MsgPack::Type::BIN16 && t != MsgPack::Type::BIN32) {
+        return; // nil (no display name set), or an unexpected shape
+    }
+    MsgPack::bin_t<uint8_t> name_bin;
+    if (!unpacker.unpack(name_bin)) return;
+    size_t n = name_bin.size();
+    if (n > out_size - 1) n = out_size - 1;
+    memcpy(out, name_bin.data(), n);
+    out[n] = '\0';
+}
+
+static void peopleheard_record(const RNS::Bytes& destination_hash, const RNS::Bytes& app_data) {
+    if (destination_hash.size() < PEOPLEHEARD_HASH_LEN) return;
+    const uint8_t* hb = destination_hash.data();
+
+    int slot = -1;
+    int oldest = 0;
+    for (int i = 0; i < PEOPLEHEARD_MAX; i++) {
+        if (peopleheard_table[i].used && memcmp(peopleheard_table[i].hash, hb, PEOPLEHEARD_HASH_LEN) == 0) {
+            slot = i;
+            break;
+        }
+        if (!peopleheard_table[i].used) {
+            if (slot == -1) slot = i;
+        } else if (peopleheard_table[i].last_seen_ms < peopleheard_table[oldest].last_seen_ms) {
+            oldest = i;
+        }
+    }
+    if (slot == -1) slot = oldest; // table full -- evict the oldest entry
+
+    PeopleHeardEntry& e = peopleheard_table[slot];
+    e.used = true;
+    memcpy(e.hash, hb, PEOPLEHEARD_HASH_LEN);
+    e.last_seen_ms = millis();
+    lxmf_display_name(app_data, e.name, sizeof(e.name));
+}
+
+class PeopleHeardAnnounceHandler : public RNS::AnnounceHandler {
+public:
+    PeopleHeardAnnounceHandler() : RNS::AnnounceHandler("lxmf.delivery") {}
+    virtual void received_announce(const RNS::Bytes& destination_hash, const RNS::Identity&, const RNS::Bytes& app_data) override {
+        peopleheard_record(destination_hash, app_data);
+    }
+};
+static RNS::HAnnounceHandler peopleheard_handler = std::make_shared<PeopleHeardAnnounceHandler>();
+
 // ─── Pages (Micron markup) ───────────────────────────────────────────────────
 // Signature fixed by RNS::RequestHandler::response_generator — unused params
 // (path/data/request_id/link_id/remote_identity/requested_at) are required by
@@ -347,11 +458,14 @@ static RNS::Bytes nomadnode_page_index(const RNS::Bytes&, const RNS::Bytes&, con
     }
     mu += buf;
 
+    mu_battery(mu);
+
     mu += ">Pages\n";
     mu += "`[Stats`/page/stats.mu]\n";
     mu += "`[Info`/page/info.mu]\n";
     mu += "`[Hardware`/page/hardware.mu]\n";
     mu += "`[Nodes`/page/nodes.mu]\n";
+    mu += "`[People`/page/people.mu]\n";
     mu += "`[Config`/page/config.mu]\n";
     mu += "`[Advert`/page/advert.mu]\n";
 
@@ -476,6 +590,51 @@ static RNS::Bytes nomadnode_page_nodes(const RNS::Bytes&, const RNS::Bytes&, con
 
     mu += "\n`[<< Back`/page/index.mu]\n";
     return mu_finish(mu, "nodes.mu");
+}
+
+static RNS::Bytes nomadnode_page_people(const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Identity&, double) {
+    std::string mu;
+    mu_title(mu, "People we heard");
+
+    uint32_t now = millis();
+    bool shown[PEOPLEHEARD_MAX] = {false};
+    int shown_count = 0;
+    const size_t reserve_tail = 32;
+
+    for (int pick = 0; pick < PEOPLEHEARD_MAX; pick++) {
+        int best = -1;
+        for (int i = 0; i < PEOPLEHEARD_MAX; i++) {
+            if (!peopleheard_table[i].used || shown[i]) continue;
+            if (best == -1 || peopleheard_table[i].last_seen_ms > peopleheard_table[best].last_seen_ms) best = i;
+        }
+        if (best == -1) break;
+
+        PeopleHeardEntry& e = peopleheard_table[best];
+        char hashhex[9];
+        snprintf(hashhex, sizeof(hashhex), "%02x%02x%02x%02x", e.hash[0], e.hash[1], e.hash[2], e.hash[3]);
+        std::string label = (e.name[0] != '\0') ? std::string(e.name) : std::string(hashhex);
+
+        uint32_t age_s = (now - e.last_seen_ms) / 1000UL;
+        char ago[8];
+        if (age_s < 60) snprintf(ago, sizeof(ago), "%lus", (unsigned long)age_s);
+        else if (age_s < 3600) snprintf(ago, sizeof(ago), "%lum", (unsigned long)(age_s / 60UL));
+        else snprintf(ago, sizeof(ago), "%luh", (unsigned long)(age_s / 3600UL));
+
+        char line[64];
+        snprintf(line, sizeof(line), "%s ago - %s\n", ago, label.c_str());
+
+        if (mu.size() + strlen(line) + reserve_tail > NOMADNODE_PAGE_BUDGET) break;
+
+        shown[best] = true;
+        shown_count++;
+        mu += line;
+    }
+    if (shown_count == 0) {
+        mu += "(none yet -- no lxmf.delivery announce heard)\n";
+    }
+
+    mu += "\n`[<< Back`/page/index.mu]\n";
+    return mu_finish(mu, "people.mu");
 }
 
 static RNS::Bytes nomadnode_page_config(const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Bytes&, const RNS::Identity&, double) {
@@ -683,6 +842,7 @@ inline void nomadnode_init() {
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/info.mu"),     nomadnode_page_info,     RNS::Type::Destination::ALLOW_ALL);
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/hardware.mu"), nomadnode_page_hardware, RNS::Type::Destination::ALLOW_ALL);
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/nodes.mu"),    nomadnode_page_nodes,    RNS::Type::Destination::ALLOW_ALL);
+    nomadnode_destination.register_request_handler(RNS::Bytes("/page/people.mu"),   nomadnode_page_people,   RNS::Type::Destination::ALLOW_ALL);
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/config.mu"),   nomadnode_page_config,   RNS::Type::Destination::ALLOW_ALL);
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/advert.mu"),   nomadnode_page_advert,   RNS::Type::Destination::ALLOW_ALL);
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/admin.mu"),        nomadnode_page_admin,        RNS::Type::Destination::ALLOW_ALL);
@@ -690,6 +850,7 @@ inline void nomadnode_init() {
     nomadnode_destination.register_request_handler(RNS::Bytes("/page/admin_reboot.mu"), nomadnode_page_admin_reboot, RNS::Type::Destination::ALLOW_ALL);
 
     RNS::Transport::register_announce_handler(nodesheard_handler);
+    RNS::Transport::register_announce_handler(peopleheard_handler);
     RNS::Transport::register_announce_handler(peer_census_handler);
 
     nomadnode_initialised = true;
